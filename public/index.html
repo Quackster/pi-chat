@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pi Chat</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <h1>Pi Chat</h1>
+      <input id="search" type="search" placeholder="Filter sessions" autocomplete="off">
+      <ul id="session-list" title="Click to select, Ctrl+click to add, drag to select many, Ctrl+A for all"></ul>
+      <footer id="sidebar-footer">
+        <button id="delete-selected-btn" type="button" hidden>Delete</button>
+        <button id="new-session-btn" type="button">New session</button>
+        <button id="refresh-btn" type="button">Refresh</button>
+      </footer>
+    </aside>
+    <main id="main">
+      <div id="empty-state">Select a session from the left.</div>
+      <div id="chat" hidden>
+        <header id="chat-header">
+          <div id="chat-title-row">
+            <span id="chat-name"></span>
+            <span id="chat-cwd"></span>
+            <span id="chat-model"></span>
+          </div>
+          <div id="chat-status-row">
+            <select id="model-select" title="Change model"><option value="">Choose model…</option></select>
+            <span id="status-dot" class="dot"></span>
+            <span id="status-text"></span>
+            <button id="stop-btn" type="button">Stop process</button>
+          </div>
+        </header>
+        <div id="messages"></div>
+        <footer id="input-bar">
+          <textarea id="input" rows="2"
+            placeholder="Send a message to Pi. Enter sends, Shift+Enter adds a newline."></textarea>
+          <div id="input-buttons">
+            <button id="abort-btn" type="button" hidden>Abort</button>
+            <button id="send-btn" type="button">Send</button>
+          </div>
+        </footer>
+      </div>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

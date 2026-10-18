@@ -1,0 +1,17 @@
+{
+  "name": "pi-chat",
+  "version": "0.1.0",
+  "description": "Website UI to chat with your Pi sessions",
+  "private": true,
+  "type": "module",
+  "main": "src/main.js",
+  "bin": {
+    "pi-chat": "src/main.js"
+  },
+  "scripts": {
+    "start": "node src/main.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
