@@ -16,6 +16,8 @@ The right pane is the tool call panel. It shows each command and its result.
 - Launches `pi --mode rpc --session <id>` on demand. Always headless.
 - Keeps one process per session alive between messages.
 - Streams agent events to the browser over Server-Sent Events.
+- Renders extension UI events (status, widgets, notifications, dialogs) generically. Any Pi extension can show state in the UI. The goal extension shows its live goal status this way.
+- The chat input accepts slash commands. A menu lists the available commands. Commands can be sent while the agent is streaming.
 - The session file on disk is the source of truth for history.
 
 ## Usage
@@ -46,7 +48,10 @@ The Pi process starts on the first message if it is not already running.
 | `/api/sessions` | GET | List all sessions, newest first |
 | `/api/sessions/:id/messages` | GET | Active branch of one session |
 | `/api/sessions/:id/status` | GET | Process status for one session |
-| `/api/sessions/:id/prompt` | POST | Send a message. Body: `{"message": "...", "streamingBehavior": "steer" \| "followUp"}` |
+| `/api/sessions/:id/models` | GET | Models available to one session |
+| `/api/sessions/:id/commands` | GET | Slash commands available to one session |
+| `/api/sessions/:id/prompt` | POST | Send a message or slash command. Body: `{"message": "...", "streamingBehavior": "steer" \| "followUp"}` |
+| `/api/sessions/:id/ui-response` | POST | Answer an extension UI dialog. Body: `{"id": "...", "value": "..."}` or `{"id": "...", "confirmed": true}` or `{"id": "...", "cancelled": true}` |
 | `/api/sessions/:id/abort` | POST | Abort the in-flight run |
 | `/api/sessions/:id/stop` | POST | Stop the session process |
 | `/api/sessions/:id/events` | GET | SSE stream of agent events |

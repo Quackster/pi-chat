@@ -160,6 +160,25 @@ export class SessionProcessManager {
     return this.sendCommand(sessionId, { type: "abort" });
   }
 
+  // List the slash commands available to the session (extension commands,
+  // prompt templates, skills). Spawns the process if needed.
+  async getCommands(sessionMeta) {
+    await this.ensureProcess(sessionMeta);
+    const response = await this.sendCommand(sessionMeta.id, { type: "get_commands" });
+    if (response.success === false) throw new Error(response.error ?? "failed to list commands");
+    return response.data?.commands ?? [];
+  }
+
+  // Send an extension UI dialog response to a live process.
+  // The agent matches it to its pending dialog by id. Fire and forget.
+  sendUiResponse(sessionId, response) {
+    const record = this.processes_.get(sessionId);
+    if (record === undefined || record.exited || record.proc.stdin.destroyed) {
+      throw new Error(`no live pi process for session ${sessionId}`);
+    }
+    record.proc.stdin.write(`${JSON.stringify(response)}\n`);
+  }
+
   // Terminate the session process. The next prompt spawns a fresh one.
   stop(sessionId) {
     const record = this.processes_.get(sessionId);

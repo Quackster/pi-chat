@@ -239,6 +239,39 @@ export function createServer(options) {
       const models = await manager.getAvailableModels(session);
       return sendJson(res, 200, { models });
     }
+    if (action === "commands" && req.method === "GET") {
+      const commands = await manager.getCommands(session);
+      return sendJson(res, 200, { commands });
+    }
+    if (action === "ui-response" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      if (typeof body.id !== "string" || !body.id) {
+        return sendJson(res, 400, { error: "id must be a non-empty string" });
+      }
+      const hasValue = "value" in body;
+      const hasConfirmed = "confirmed" in body;
+      const hasCancelled = body.cancelled === true;
+      const count = (hasValue ? 1 : 0) + (hasConfirmed ? 1 : 0) + (hasCancelled ? 1 : 0);
+      if (count !== 1) {
+        return sendJson(res, 400, { error: "exactly one of value, confirmed, or cancelled is required" });
+      }
+      if (hasValue && typeof body.value !== "string") {
+        return sendJson(res, 400, { error: "value must be a string" });
+      }
+      if (hasConfirmed && typeof body.confirmed !== "boolean") {
+        return sendJson(res, 400, { error: "confirmed must be a boolean" });
+      }
+      const response = { type: "extension_ui_response", id: body.id };
+      if (hasValue) response.value = body.value;
+      if (hasConfirmed) response.confirmed = body.confirmed;
+      if (hasCancelled) response.cancelled = true;
+      try {
+        manager.sendUiResponse(session.id, response);
+      } catch (err) {
+        return sendJson(res, 502, { error: err.message });
+      }
+      return sendJson(res, 200, { ok: true });
+    }
     if (action === "model" && req.method === "POST") {
       const body = await readJsonBody(req);
       if (typeof body.provider !== "string" || typeof body.modelId !== "string") {

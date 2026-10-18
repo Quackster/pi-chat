@@ -1,2 +1,5 @@
 # Generated at runtime by pi-chat.
 tmp/
+
+# Pi runtime state (goal files, session state).
+.pi/

@@ -5,6 +5,7 @@
 const kPanelStorageKey = "pi-chat-tool-panel";
 const kDiffToolNames = new Set(["edit", "write"]);
 const kFlashMs = 1500;
+const kToastMs = 6000;
 
 const state = {
   sessions: [],
@@ -18,6 +19,11 @@ const state = {
   panelOpen: true,
   autoTitle: true,
   liveTools: new Map(), // toolCallId -> { head, output }
+  commands: [], // { name, description, source }
+  extStatus: new Map(), // statusKey -> statusText
+  extWidgets: new Map(), // widgetKey -> string[]
+  pendingDialog: null, // { sessionId, request }
+  menuIndex: -1,
 };
 
 // Tracks which session the model list is already loaded for.
@@ -48,6 +54,14 @@ const elements = {
   toolPanelBody: document.getElementById("tool-panel-body"),
   toolPanelToggle: document.getElementById("tool-panel-toggle"),
   toolPanelClose: document.getElementById("tool-panel-close"),
+  extStatusBox: document.getElementById("ext-status-box"),
+  extWidget: document.getElementById("ext-widget"),
+  commandMenu: document.getElementById("command-menu"),
+  toasts: document.getElementById("toasts"),
+  dialogBackdrop: document.getElementById("ext-dialog-backdrop"),
+  dialogTitle: document.getElementById("ext-dialog-title"),
+  dialogBody: document.getElementById("ext-dialog-body"),
+  dialogActions: document.getElementById("ext-dialog-actions"),
 };
 
 // Fetch a JSON API endpoint. Throws with the server error message.
@@ -340,7 +354,13 @@ function handleKeydown(e) {
     selectAllVisible();
     return;
   }
-  if (e.key === "Escape") clearSelection();
+  if (e.key === "Escape") {
+    if (state.pendingDialog) {
+      cancelDialog();
+      return;
+    }
+    clearSelection();
+  }
 }
 
 // Start a new session in a chosen working directory.
@@ -370,6 +390,7 @@ function resetView() {
   elements.emptyState.hidden = false;
   elements.messages.innerHTML = "";
   clearToolPanel();
+  resetExtensionUi();
   syncToolPanelVisibility();
   renderSessionList();
 }
@@ -436,6 +457,8 @@ async function openSession(id) {
   loadModels();
   loadTitle(id);
   clearToolPanel();
+  resetExtensionUi();
+  loadCommands();
   await refreshMessages();
   openEventStream(id);
 }
@@ -526,6 +549,224 @@ async function changeModel() {
   } catch (err) {
     elements.messages.append(el("div", "error-line", `Model change failed: ${err.message}`));
   }
+}
+
+// Clear the per-session extension UI state (status, widgets, commands).
+function resetExtensionUi() {
+  state.extStatus.clear();
+  state.extWidgets.clear();
+  state.commands = [];
+  state.pendingDialog = null;
+  elements.dialogBackdrop.hidden = true;
+  renderExtStatus();
+  renderExtWidget();
+  hideCommandMenu();
+}
+
+// Load the slash commands available to the session (extension commands,
+// prompt templates, skills). The process is spawned on demand by the server.
+async function loadCommands() {
+  const requestedId = state.activeId;
+  try {
+    const data = await api(`/api/sessions/${requestedId}/commands`);
+    if (requestedId !== state.activeId) return;
+    state.commands = data.commands ?? [];
+    renderCommandMenu();
+  } catch (err) {
+    console.error("command list failed:", err);
+  }
+}
+
+// The command token being typed, or null when the input is not a command.
+// A command is a leading "/" with no space typed yet.
+function commandToken(text) {
+  if (!text.startsWith("/") || /\s/.test(text)) return null;
+  return text.slice(1);
+}
+
+// Commands matching the typed token by name prefix.
+function filterCommands(token) {
+  const query = token.toLowerCase();
+  return state.commands.filter((command) => command.name.toLowerCase().startsWith(query));
+}
+
+// Show or hide the command menu above the input, with the active row.
+function renderCommandMenu() {
+  const token = commandToken(elements.input.value);
+  const menu = elements.commandMenu;
+  if (token === null) {
+    hideCommandMenu();
+    return;
+  }
+  const matches = filterCommands(token);
+  if (matches.length === 0) {
+    menu.hidden = true;
+    state.menuIndex = -1;
+    return;
+  }
+  menu.innerHTML = "";
+  matches.forEach((command, index) => {
+    const item = el("div", "cmd-item" + (index === state.menuIndex ? " active" : ""));
+    item.append(
+      el("span", "cmd-name", `/${command.name}`),
+      el("span", "cmd-desc", command.description ?? ""),
+    );
+    item.onmousedown = (e) => {
+      e.preventDefault();
+      selectCommand(command);
+    };
+    menu.append(item);
+  });
+  menu.hidden = false;
+}
+
+// Hide the command menu and reset the highlighted row.
+function hideCommandMenu() {
+  elements.commandMenu.hidden = true;
+  state.menuIndex = -1;
+}
+
+// Fill the input with the chosen command and a trailing space.
+function selectCommand(command) {
+  elements.input.value = `/${command.name} `;
+  hideCommandMenu();
+  elements.input.focus();
+}
+
+// Render the extension status box (e.g. the live goal status line).
+// One line per status key. Generic: any extension's status shows up.
+function renderExtStatus() {
+  const box = elements.extStatusBox;
+  box.innerHTML = "";
+  for (const [key, text] of state.extStatus) {
+    const label = text.startsWith(`${key}: `) ? text : `${key}: ${text}`;
+    box.append(el("div", "ext-status-line", label));
+  }
+  box.hidden = state.extStatus.size === 0;
+}
+
+// Render the extension widget lines above the input bar.
+function renderExtWidget() {
+  const widget = elements.extWidget;
+  widget.innerHTML = "";
+  let any = false;
+  for (const lines of state.extWidgets.values()) {
+    for (const line of lines) {
+      widget.append(el("div", "ext-widget-line", line));
+      any = true;
+    }
+  }
+  widget.hidden = !any;
+}
+
+// Show a toast notification. It auto-dismisses after a few seconds.
+function showToast(message, type) {
+  const toast = el("div", `toast ${type ?? "info"}`, String(message));
+  toast.onclick = () => toast.remove();
+  elements.toasts.append(toast);
+  setTimeout(() => toast.remove(), kToastMs);
+}
+
+// Handle one extension UI request (status, widget, notify, dialogs).
+// This is generic: any extension's UI state shows up, not just goals.
+function handleExtensionUi(event) {
+  if (event.method === "notify") {
+    showToast(event.message, event.notifyType ?? "info");
+    return;
+  }
+  if (event.method === "setStatus") {
+    if (event.statusText === undefined || event.statusText === null) state.extStatus.delete(event.statusKey);
+    else state.extStatus.set(event.statusKey, event.statusText);
+    renderExtStatus();
+    return;
+  }
+  if (event.method === "setWidget") {
+    if (event.widgetLines === undefined || event.widgetLines === null) state.extWidgets.delete(event.widgetKey);
+    else state.extWidgets.set(event.widgetKey, event.widgetLines);
+    renderExtWidget();
+    return;
+  }
+  if (event.method === "setTitle") {
+    if (event.title) document.title = event.title;
+    return;
+  }
+  if (["select", "confirm", "input", "editor"].includes(event.method)) {
+    openDialog(event);
+  }
+}
+
+// Open a dialog for an extension UI request. Replaces any open dialog.
+function openDialog(request) {
+  state.pendingDialog = { sessionId: state.activeId, request };
+  elements.dialogTitle.textContent = request.title ?? "";
+  const body = elements.dialogBody;
+  const actions = elements.dialogActions;
+  body.innerHTML = "";
+  actions.innerHTML = "";
+  if (request.method === "select") {
+    for (const option of request.options ?? []) {
+      const button = el("button", "dialog-option", option);
+      button.type = "button";
+      button.onclick = () => respondDialog({ value: option });
+      body.append(button);
+    }
+  } else if (request.method === "confirm") {
+    if (request.message) body.append(el("div", "dialog-message", request.message));
+    const yes = el("button", "", "Yes");
+    yes.type = "button";
+    yes.onclick = () => respondDialog({ confirmed: true });
+    const no = el("button", "", "No");
+    no.type = "button";
+    no.onclick = () => respondDialog({ confirmed: false });
+    actions.append(yes, no);
+  } else if (request.method === "input" || request.method === "editor") {
+    const field = document.createElement(request.method === "input" ? "input" : "textarea");
+    field.className = "dialog-field";
+    if (request.method === "input") {
+      field.type = "text";
+      field.placeholder = request.placeholder ?? "";
+    } else {
+      field.rows = 8;
+    }
+    field.value = request.prefill ?? "";
+    body.append(field);
+    const ok = el("button", "", request.method === "input" ? "OK" : "Save");
+    ok.type = "button";
+    ok.onclick = () => respondDialog({ value: field.value });
+    const cancel = el("button", "", "Cancel");
+    cancel.type = "button";
+    cancel.onclick = () => respondDialog({ cancelled: true });
+    actions.append(ok, cancel);
+    field.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && request.method === "input") {
+        e.preventDefault();
+        respondDialog({ value: field.value });
+      }
+    });
+  }
+  elements.dialogBackdrop.hidden = false;
+}
+
+// Close the dialog and send the response to the session that asked.
+async function respondDialog(payload) {
+  const pending = state.pendingDialog;
+  state.pendingDialog = null;
+  elements.dialogBackdrop.hidden = true;
+  if (!pending) return;
+  try {
+    await api(`/api/sessions/${pending.sessionId}/ui-response`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: pending.request.id, ...payload }),
+    });
+  } catch (err) {
+    showToast(`Dialog response failed: ${err.message}`, "error");
+  }
+}
+
+// Dismiss the open dialog without answering.
+function cancelDialog() {
+  respondDialog({ cancelled: true });
 }
 
 // Re-render the message history and the tool panel from disk (the source of truth).
@@ -844,6 +1085,10 @@ function closeEventStream() {
 // Route one live agent event to the UI.
 function handleAgentEvent(event) {
   switch (event.type) {
+    case "agent_start":
+      state.streaming = true;
+      elements.abortBtn.hidden = false;
+      break;
     case "message_start":
       if (event.message?.role === "assistant") startStreamBubble();
       break;
@@ -871,6 +1116,9 @@ function handleAgentEvent(event) {
     case "process_exited":
       updateStatus({ running: false });
       break;
+    case "extension_ui_request":
+      handleExtensionUi(event);
+      break;
   }
 }
 
@@ -886,26 +1134,41 @@ function updateStatus(status) {
   }
 }
 
-// Send the current input as a prompt.
+// Send the current input as a message or a slash command.
+// Slash commands are allowed while streaming: extension commands run
+// immediately in pi, other commands are queued as follow-ups.
 async function sendMessage() {
   const text = elements.input.value.trim();
-  if (!text || state.streaming) return;
+  if (!text) return;
+  const isCommand = text.startsWith("/");
+  if (state.streaming && !isCommand) return;
   elements.input.value = "";
+  hideCommandMenu();
   const bubble = el("div", "msg user");
   bubble.append(el("div", "msg-label", "You"), el("div", "msg-body", text));
   elements.messages.append(bubble);
   scrollBottom();
-  state.streaming = true;
-  elements.abortBtn.hidden = false;
+  const body = { message: text };
+  if (state.streaming) {
+    const first = text.slice(1).split(/\s+/)[0];
+    const knownExtension = state.commands.some((c) => c.source === "extension" && c.name === first);
+    if (!knownExtension) body.streamingBehavior = "followUp";
+  }
+  if (!isCommand) {
+    state.streaming = true;
+    elements.abortBtn.hidden = false;
+  }
   try {
     await api(`/api/sessions/${state.activeId}/prompt`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text }),
+      body: JSON.stringify(body),
     });
   } catch (err) {
-    state.streaming = false;
-    elements.abortBtn.hidden = true;
+    if (!isCommand) {
+      state.streaming = false;
+      elements.abortBtn.hidden = true;
+    }
     elements.messages.append(el("div", "error-line", `Send failed: ${err.message}`));
     scrollBottom();
   }
@@ -951,11 +1214,40 @@ function init() {
   elements.toolPanelClose.onclick = toggleToolPanel;
   state.panelOpen = loadPanelOpen();
   setToolPanel(state.panelOpen);
+  elements.input.addEventListener("input", renderCommandMenu);
   elements.input.addEventListener("keydown", (e) => {
+    const menuVisible = !elements.commandMenu.hidden;
+    if (menuVisible && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
+      e.preventDefault();
+      const matches = filterCommands(commandToken(elements.input.value) ?? "");
+      if (matches.length > 0) {
+        const count = matches.length;
+        state.menuIndex = e.key === "ArrowDown"
+          ? (state.menuIndex + 1) % count
+          : (state.menuIndex - 1 + count) % count;
+        renderCommandMenu();
+      }
+      return;
+    }
+    if (menuVisible && (e.key === "Tab" || e.key === "Enter") && state.menuIndex >= 0) {
+      e.preventDefault();
+      const matches = filterCommands(commandToken(elements.input.value) ?? "");
+      selectCommand(matches[state.menuIndex]);
+      return;
+    }
+    if (menuVisible && e.key === "Escape") {
+      e.preventDefault();
+      e.stopPropagation();
+      hideCommandMenu();
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
     }
+  });
+  elements.dialogBackdrop.addEventListener("click", (e) => {
+    if (e.target === elements.dialogBackdrop) cancelDialog();
   });
   elements.sessionList.addEventListener("mousedown", startDrag);
   elements.sessionList.addEventListener("click", swallowDragClick, true);
