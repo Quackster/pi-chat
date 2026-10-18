@@ -9,6 +9,9 @@ const kToastMs = 6000;
 const kTypeaheadDelayMs = 150;
 const kProcessingPlaceholder = "Processing prompt...";
 const kThinkingPreviewLines = 6;
+// Distance from the bottom edge within which a scrollable pane is
+// considered "following" new content.
+const kFollowEdgePx = 48;
 
 const state = {
   sessions: [],
@@ -26,6 +29,8 @@ const state = {
   streamThinkingRaw: "",
   streamPlaceholderEl: null,
   streamHasContent: false,
+  followMessages: true, // message pane follows new content
+  followToolPanel: true, // tool panel follows new content
   panelOpen: true,
   autoTitle: true,
   streamingBehavior: "followUp",
@@ -483,6 +488,7 @@ async function openSession(id) {
   loadModels();
   loadTitle(id);
   clearToolPanel();
+  state.followToolPanel = true;
   resetExtensionUi();
   loadCommands();
   await refreshMessages();
@@ -1105,8 +1111,11 @@ function directoryDialog() {
   });
 }
 
-// Re-render the message history and the tool panel from disk (the source of truth).
-async function refreshMessages() {
+// Re-render the message history and the tool panel from disk (the
+// source of truth). With scroll true the pane jumps to the bottom
+// (session switch). With scroll false it jumps only when the user
+// is already following.
+async function refreshMessages(scroll) {
   const data = await api(`/api/sessions/${state.activeId}/messages`);
   const container = elements.messages;
   container.innerHTML = "";
@@ -1115,7 +1124,8 @@ async function refreshMessages() {
     const dom = entryToDom(entry);
     if (dom) container.append(dom);
   }
-  scrollBottom();
+  if (scroll) state.followMessages = true;
+  if (state.followMessages) scrollBottom();
 }
 
 // Render the tool panel from session entries: one entry per tool call
@@ -1385,7 +1395,7 @@ function startStreamBubble() {
   state.streamThinkingBox = thinking;
   state.streamThinkingEl = thinkingPre;
   state.streamPlaceholderEl = placeholder;
-  scrollBottom();
+  followMessagesScroll();
 }
 
 // Reuse the placeholder bubble when it has no content yet; otherwise
@@ -1415,7 +1425,7 @@ function scheduleStreamTextRender() {
     state.streamRenderPending = false;
     if (!state.streamTextEl) return;
     state.streamTextEl.innerHTML = renderMarkdown(state.streamTextRaw);
-    scrollBottom();
+    followMessagesScroll();
   });
 }
 
@@ -1429,7 +1439,7 @@ function appendStreamThinking(delta) {
   state.streamThinkingRaw += delta;
   const expanded = !state.streamThinkingBox.classList.contains("collapsed");
   state.streamThinkingEl.textContent = expanded ? state.streamThinkingRaw : thinkingTail(state.streamThinkingRaw);
-  scrollBottom();
+  followMessagesScroll();
 }
 
 // Mark the bubble as having content: hide the processing placeholder.
@@ -1474,7 +1484,7 @@ function addLiveToolBlock(event) {
     state.streamBubble.append(toolCallChip(event.toolName, event.args, event.toolCallId));
     markStreamContent();
   }
-  scrollPanelBottom();
+  followToolPanelScroll();
 }
 
 // Update the live tool entry with accumulated output.
@@ -1555,7 +1565,7 @@ function handleAgentEvent(event) {
       state.streaming = false;
       elements.stopRunBtn.hidden = true;
       finishStreamBubble();
-      refreshMessages();
+      refreshMessages(false);
       if (state.autoTitle) loadTitle(state.activeId);
       break;
     case "process_exited":
@@ -1635,9 +1645,28 @@ async function stopProcess() {
   }
 }
 
+// Check whether a scrollable pane is within kFollowEdgePx of its
+// bottom edge.
+function isNearBottom(node) {
+  return node.scrollHeight - node.scrollTop - node.clientHeight <= kFollowEdgePx;
+}
+
 // Scroll the message pane to the bottom.
 function scrollBottom() {
   elements.messages.scrollTop = elements.messages.scrollHeight;
+}
+
+// Follow the message pane: scroll to the bottom only while the user
+// is still near it. Lets the user read older messages without
+// streaming updates pulling the view down.
+function followMessagesScroll() {
+  if (state.followMessages) scrollBottom();
+}
+
+// Follow the tool panel: scroll to the bottom only while the user
+// is still near it.
+function followToolPanelScroll() {
+  if (state.followToolPanel) scrollPanelBottom();
 }
 
 // Wire up static controls.
@@ -1655,6 +1684,12 @@ function init() {
   elements.thinkingLevelSelect.addEventListener("change", changeThinkingLevel);
   elements.toolPanelToggle.onclick = toggleToolPanel;
   elements.toolPanelClose.onclick = toggleToolPanel;
+  elements.messages.addEventListener("scroll", () => {
+    state.followMessages = isNearBottom(elements.messages);
+  });
+  elements.toolPanelBody.addEventListener("scroll", () => {
+    state.followToolPanel = isNearBottom(elements.toolPanelBody);
+  });
   state.panelOpen = loadPanelOpen();
   setToolPanel(state.panelOpen);
   elements.input.addEventListener("input", renderCommandMenu);
