@@ -16,6 +16,7 @@ const state = {
   streamBubble: null,
   streamTextEl: null,
   panelOpen: true,
+  autoTitle: true,
   liveTools: new Map(), // toolCallId -> { head, output }
 };
 
@@ -47,6 +48,7 @@ const elements = {
   toolPanelBody: document.getElementById("tool-panel-body"),
   toolPanelToggle: document.getElementById("tool-panel-toggle"),
   toolPanelClose: document.getElementById("tool-panel-close"),
+  autoTitleToggle: document.getElementById("auto-title-toggle"),
 };
 
 // Fetch a JSON API endpoint. Throws with the server error message.
@@ -454,6 +456,32 @@ async function loadTitle(id) {
   }
 }
 
+// Load the server config and apply it to the UI.
+async function loadConfig() {
+  try {
+    const data = await api("/api/config");
+    state.autoTitle = Boolean(data.autoTitle);
+    elements.autoTitleToggle.checked = state.autoTitle;
+  } catch (err) {
+    console.error("config load failed:", err);
+  }
+}
+
+// Save the auto title toggle to the server config.
+async function saveAutoTitle() {
+  try {
+    const data = await api("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ autoTitle: elements.autoTitleToggle.checked }),
+    });
+    state.autoTitle = Boolean(data.autoTitle);
+  } catch (err) {
+    console.error("config save failed:", err);
+    elements.autoTitleToggle.checked = state.autoTitle;
+  }
+}
+
 // Load the available model list once per session, when the session opens.
 // Resets the dropdown, fills it, then selects the session's current model.
 async function loadModels() {
@@ -855,6 +883,7 @@ function handleAgentEvent(event) {
       elements.abortBtn.hidden = true;
       finishStreamBubble();
       refreshMessages();
+      if (state.autoTitle) loadTitle(state.activeId);
       break;
     case "process_exited":
       updateStatus({ running: false });
@@ -937,6 +966,7 @@ function init() {
   elements.modelSelect.addEventListener("change", changeModel);
   elements.toolPanelToggle.onclick = toggleToolPanel;
   elements.toolPanelClose.onclick = toggleToolPanel;
+  elements.autoTitleToggle.onchange = saveAutoTitle;
   state.panelOpen = loadPanelOpen();
   setToolPanel(state.panelOpen);
   elements.input.addEventListener("keydown", (e) => {
@@ -953,13 +983,15 @@ function init() {
   boot();
 }
 
-// Load the session list on startup; the default page shows until a session is opened.
+// Load the session list and config on startup; the default page shows
+// until a session is opened.
 async function boot() {
   try {
     await loadSessions();
   } catch (err) {
     console.error("failed to load sessions:", err);
   }
+  loadConfig();
 }
 
 init();

@@ -94,9 +94,10 @@ async function openSseStream(res, sessionId, manager) {
   });
 }
 
-// Create the HTTP server. options: { sessionsDir, manager, publicDir, titleStore }.
+// Create the HTTP server.
+// options: { sessionsDir, manager, publicDir, titleStore, config }.
 export function createServer(options) {
-  const { sessionsDir, manager, publicDir, titleStore } = options;
+  const { sessionsDir, manager, publicDir, titleStore, config } = options;
 
   // Stop the session process, forget it, and delete its file and title.
   // Throws when the session is not known and not on disk.
@@ -126,8 +127,46 @@ export function createServer(options) {
     return title;
   }
 
+  // Generate a title for the first user prompt of a session when auto
+  // titles are enabled. Fire and forget: the prompt must not wait for
+  // the title model run.
+  async function maybeAutoTitle(session, message) {
+    try {
+      if (!(await config.get("autoTitle"))) return;
+      if (await titleStore.get(session.id)) return;
+      if (session.name) return;
+      const entries = await readSessionMessages(session.file);
+      const hasUserMessage = entries.some(
+        (entry) => entry.type === "message" && entry.message?.role === "user",
+      );
+      if (hasUserMessage) return;
+      const title = await generateSessionTitle({
+        piCommand: manager.getPiCommand(),
+        cwd: session.cwd,
+        entries: [{ type: "message", message: { role: "user", content: message } }],
+      });
+      if (title) {
+        await titleStore.set(session.id, title);
+        log(`auto title for session ${session.id}: ${title}`);
+      }
+    } catch (err) {
+      log(`auto title for session ${session.id} failed: ${err.message}`);
+    }
+  }
+
   // Handle one API request. parts is the pathname split into segments.
   async function handleApi(req, res, parts) {
+    if (parts[1] === "config") {
+      if (req.method === "GET") {
+        return sendJson(res, 200, await config.all());
+      }
+      if (req.method === "POST") {
+        const body = await readJsonBody(req);
+        if (body.autoTitle !== undefined) await config.set("autoTitle", body.autoTitle);
+        return sendJson(res, 200, await config.all());
+      }
+      return sendJson(res, 405, { error: "use GET or POST" });
+    }
     if (parts[1] === "new-session") {
       if (req.method !== "POST") return sendJson(res, 405, { error: "use POST" });
       const body = await readJsonBody(req);
@@ -214,6 +253,7 @@ export function createServer(options) {
       if (typeof body.message !== "string" || !body.message.trim()) {
         return sendJson(res, 400, { error: "message must be a non-empty string" });
       }
+      maybeAutoTitle(session, body.message);
       const response = await manager.prompt(session, body.message, body.streamingBehavior);
       return sendJson(res, 200, { ok: true, response });
     }

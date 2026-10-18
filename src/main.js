@@ -7,6 +7,7 @@ import path from "node:path";
 import { createServer } from "./server.js";
 import { SessionProcessManager } from "./rpc_manager.js";
 import { SessionTitleStore } from "./session_titles.js";
+import { AppConfig } from "./config.js";
 
 const kDefaultPort = 8090;
 const kDefaultHost = "127.0.0.1";
@@ -22,12 +23,14 @@ function main() {
 
   const manager = new SessionProcessManager({ fallbackCwd: os.homedir() });
   const titleStore = new SessionTitleStore(tmpDir);
-  const server = createServer({ sessionsDir, manager, publicDir, titleStore });
+  const config = new AppConfig(path.join(import.meta.dirname, "..", "config.json"));
+  const server = createServer({ sessionsDir, manager, publicDir, titleStore, config });
 
   server.listen(port, host, () => {
     console.log(`pi-chat: listening on http://${host}:${port}`);
     console.log(`pi-chat: sessions dir ${sessionsDir}`);
     console.log(`pi-chat: titles file ${titleStore.file_}`);
+    console.log(`pi-chat: config file ${config.file_}`);
   });
 
   const shutdown = () => {
