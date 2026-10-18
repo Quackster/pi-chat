@@ -28,6 +28,11 @@ export class SessionProcessManager {
     this.knownSessions_ = new Map(); // sessionId -> summary (sessions we created)
   }
 
+  // The pi executable used for all spawns.
+  getPiCommand() {
+    return this.piCommand_;
+  }
+
   // Summaries of sessions this server created. pi writes their files lazily
   // (on the first assistant message), so disk lookups may miss them.
   getKnownSessions() {

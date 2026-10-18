@@ -29,7 +29,7 @@ function parseJsonl(raw, fileName) {
 }
 
 // Extract plain text from a message content field (string or block array).
-function extractText(content) {
+export function extractText(content) {
   if (typeof content === "string") return content;
   if (Array.isArray(content)) {
     return content

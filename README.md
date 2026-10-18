@@ -2,6 +2,14 @@
 
 Website UI interface to chat with your Pi agents.
 
+## Screenshot
+
+![pi-chat screenshot](docs/screenshot.png)
+
+The left pane lists sessions. The center pane shows the message stream.
+Tool calls appear as chips. File edits show as diffs. Thinking stays expanded.
+The right pane is the tool call panel. It shows each command and its result.
+
 ## How it works
 
 - Reads Pi sessions from `~/.pi/agent/sessions/` (JSONL files).

@@ -2,6 +2,10 @@
 // Loads sessions from the server API, renders the active branch, and
 // streams live agent events over Server-Sent Events.
 
+const kPanelStorageKey = "pi-chat-tool-panel";
+const kDiffToolNames = new Set(["edit", "write"]);
+const kFlashMs = 1500;
+
 const state = {
   sessions: [],
   activeId: null,
@@ -11,7 +15,8 @@ const state = {
   streaming: false,
   streamBubble: null,
   streamTextEl: null,
-  liveTools: new Map(), // toolCallId -> { summary, pre }
+  panelOpen: true,
+  liveTools: new Map(), // toolCallId -> { head, output }
 };
 
 // Tracks which session the model list is already loaded for.
@@ -24,6 +29,8 @@ const elements = {
   newSessionBtn: document.getElementById("new-session-btn"),
   deleteSelectedBtn: document.getElementById("delete-selected-btn"),
   emptyState: document.getElementById("empty-state"),
+  emptySummary: document.getElementById("empty-summary"),
+  emptyNewBtn: document.getElementById("empty-new-btn"),
   chat: document.getElementById("chat"),
   chatName: document.getElementById("chat-name"),
   chatCwd: document.getElementById("chat-cwd"),
@@ -36,6 +43,10 @@ const elements = {
   input: document.getElementById("input"),
   sendBtn: document.getElementById("send-btn"),
   abortBtn: document.getElementById("abort-btn"),
+  toolPanel: document.getElementById("tool-panel"),
+  toolPanelBody: document.getElementById("tool-panel-body"),
+  toolPanelToggle: document.getElementById("tool-panel-toggle"),
+  toolPanelClose: document.getElementById("tool-panel-close"),
 };
 
 // Fetch a JSON API endpoint. Throws with the server error message.
@@ -77,7 +88,7 @@ function relativeTime(iso) {
 
 // Title shown in the session list.
 function sessionTitle(session) {
-  return session.name ?? session.preview ?? session.id.slice(0, 8);
+  return session.title ?? session.name ?? session.preview ?? session.id.slice(0, 8);
 }
 
 // Load the session list from the server and render it.
@@ -85,6 +96,16 @@ async function loadSessions() {
   const data = await api("/api/sessions");
   state.sessions = data.sessions;
   renderSessionList();
+  renderEmptyState();
+}
+
+// Render the default page summary: session count and most recent activity.
+function renderEmptyState() {
+  const count = state.sessions.length;
+  const text = count === 0
+    ? "No sessions yet. Start a new one."
+    : `${count} session${count === 1 ? "" : "s"} · last active ${relativeTime(state.sessions[0].lastActivity)}`;
+  elements.emptySummary.textContent = text;
 }
 
 // Render the session list, applying the search filter.
@@ -347,7 +368,53 @@ function resetView() {
   elements.chat.hidden = true;
   elements.emptyState.hidden = false;
   elements.messages.innerHTML = "";
+  clearToolPanel();
+  syncToolPanelVisibility();
   renderSessionList();
+}
+
+// Load the saved tool panel visibility, defaulting to open.
+function loadPanelOpen() {
+  try {
+    return localStorage.getItem(kPanelStorageKey) !== "closed";
+  } catch {
+    return true;
+  }
+}
+
+// Show or hide the tool panel, update the toggle label, and persist the choice.
+function setToolPanel(open) {
+  state.panelOpen = open;
+  elements.toolPanelToggle.textContent = open ? "Hide tools" : "Show tools";
+  elements.toolPanelToggle.classList.toggle("on", open);
+  syncToolPanelVisibility();
+  try {
+    localStorage.setItem(kPanelStorageKey, open ? "open" : "closed");
+  } catch {
+    // Storage unavailable; the choice just does not persist.
+  }
+}
+
+// Sync the panel visibility: shown only when a session is open and the
+// panel toggle is on.
+function syncToolPanelVisibility() {
+  elements.toolPanel.hidden = !state.panelOpen || elements.chat.hidden;
+}
+
+// Toggle the tool panel open or closed.
+function toggleToolPanel() {
+  setToolPanel(!state.panelOpen);
+}
+
+// Clear the tool panel.
+function clearToolPanel() {
+  elements.toolPanelBody.innerHTML = "";
+}
+
+// Scroll the tool panel to the bottom when it is visible.
+function scrollPanelBottom() {
+  if (!state.panelOpen) return;
+  elements.toolPanelBody.scrollTop = elements.toolPanelBody.scrollHeight;
 }
 
 // Open a session: show the chat pane, render history, start the event stream,
@@ -359,14 +426,32 @@ async function openSession(id) {
   const session = state.sessions.find((s) => s.id === id);
   elements.emptyState.hidden = true;
   elements.chat.hidden = false;
+  syncToolPanelVisibility();
   elements.chatName.textContent = session ? sessionTitle(session) : id;
   elements.chatCwd.textContent = session ? session.cwd : "";
   elements.chatModel.textContent = session?.model ? `· ${session.model}` : "";
   renderSessionList();
   updateStatus({ running: false });
   loadModels();
+  loadTitle(id);
+  clearToolPanel();
   await refreshMessages();
   openEventStream(id);
+}
+
+// Ask the server for the session title, generating one if needed.
+// The request may take a few seconds; the UI updates when it resolves.
+async function loadTitle(id) {
+  try {
+    const data = await api(`/api/sessions/${id}/title`);
+    if (!data.title) return;
+    const session = state.sessions.find((s) => s.id === id);
+    if (session) session.title = data.title;
+    renderSessionList();
+    if (id === state.activeId) elements.chatName.textContent = data.title;
+  } catch (err) {
+    console.error("title load failed:", err);
+  }
 }
 
 // Load the available model list once per session, when the session opens.
@@ -432,16 +517,48 @@ async function changeModel() {
   }
 }
 
-// Re-render the message history from disk (the source of truth).
+// Re-render the message history and the tool panel from disk (the source of truth).
 async function refreshMessages() {
   const data = await api(`/api/sessions/${state.activeId}/messages`);
   const container = elements.messages;
   container.innerHTML = "";
+  renderToolPanel(data.messages);
   for (const entry of data.messages) {
     const dom = entryToDom(entry);
     if (dom) container.append(dom);
   }
   scrollBottom();
+}
+
+// Render the tool panel from session entries: one entry per tool call
+// block with its result, in conversation order.
+function renderToolPanel(messages) {
+  const results = collectResults(messages);
+  const panel = elements.toolPanelBody;
+  panel.innerHTML = "";
+  for (const entry of messages) {
+    if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+    for (const block of entry.message.content ?? []) {
+      if (block.type !== "toolCall") continue;
+      const result = results.get(block.id);
+      panel.append(toolCallEntry(block.name, block.arguments, result?.text ?? null, result?.isError ?? false, block.id));
+    }
+  }
+}
+
+// Build a map of toolCallId -> { text, isError } from result messages.
+function collectResults(messages) {
+  const results = new Map();
+  for (const entry of messages) {
+    if (entry.type !== "message") continue;
+    const message = entry.message;
+    if (message.role === "toolResult") {
+      results.set(message.toolCallId, { text: extractText(message.content), isError: message.isError === true });
+    } else if (message.role === "bashExecution") {
+      results.set(message.toolCallId ?? message.id, { text: message.output ?? "", isError: false });
+    }
+  }
+  return results;
 }
 
 // Map one session entry to a DOM node. Returns null for hidden entry types.
@@ -478,49 +595,138 @@ function messageToDom(message) {
     for (const block of message.content ?? []) {
       if (block.type === "text") div.append(el("div", "msg-text", block.text));
       else if (block.type === "thinking") div.append(thinkingBlock(block.thinking));
-      else if (block.type === "toolCall") div.append(toolCallBlock(block));
+      else if (block.type === "toolCall") {
+        if (kDiffToolNames.has(block.name)) div.append(toolCallEntry(block.name, block.arguments, null, false, block.id));
+        else div.append(toolCallChip(block.name, block.arguments, block.id));
+      }
     }
     return div;
   }
-  if (message.role === "toolResult") {
-    const details = document.createElement("details");
-    details.className = "tool-result";
-    details.append(el("summary", "", `${message.toolName} result`));
-    details.append(el("pre", "", extractText(message.content)));
-    return details;
-  }
-  if (message.role === "bashExecution") {
-    const details = document.createElement("details");
-    details.className = "tool-result";
-    details.append(el("summary", "", `$ ${message.command}`));
-    details.append(el("pre", "", message.output ?? ""));
-    return details;
+  // Tool results and bash executions live in the tool panel, not the chat.
+  return null;
+}
+
+// Thinking block, always expanded.
+function thinkingBlock(text) {
+  const div = el("div", "thinking");
+  div.append(el("div", "thinking-label", "thinking"));
+  div.append(el("pre", "", text));
+  return div;
+}
+
+// Parse tool arguments into an object, or null when they do not parse.
+function parseArgs(args) {
+  if (args === undefined || args === null) return null;
+  if (typeof args === "object") return args;
+  if (typeof args === "string") {
+    try {
+      return JSON.parse(args);
+    } catch {
+      return null;
+    }
   }
   return null;
 }
 
-// Collapsible thinking block.
-function thinkingBlock(text) {
-  const details = document.createElement("details");
-  details.className = "thinking";
-  details.append(el("summary", "", "thinking"));
-  details.append(el("pre", "", text));
-  return details;
+// Build the diff lines for an edit tool call: minus lines for each
+// oldText and plus lines for each newText.
+function diffLinesForEdit(args) {
+  const path = typeof args.path === "string" ? args.path : "";
+  const lines = [
+    { kind: "file", text: `--- a/${path}` },
+    { kind: "file", text: `+++ b/${path}` },
+  ];
+  const edits = Array.isArray(args.edits) ? args.edits : [];
+  for (const edit of edits) {
+    const oldText = typeof edit.oldText === "string" ? edit.oldText : "";
+    const newText = typeof edit.newText === "string" ? edit.newText : "";
+    if (oldText) for (const line of oldText.split("\n")) lines.push({ kind: "del", text: line });
+    if (newText) for (const line of newText.split("\n")) lines.push({ kind: "add", text: line });
+  }
+  return lines;
 }
 
-// Collapsible tool call block with the arguments as JSON.
-function toolCallBlock(block) {
-  const details = document.createElement("details");
-  details.className = "tool-call";
-  const args = block.arguments
-    ? typeof block.arguments === "string"
-      ? block.arguments
-      : JSON.stringify(block.arguments, null, 2)
-    : "";
-  const firstLine = args.split("\n")[0].slice(0, 80);
-  details.append(el("summary", "", `${block.name} ${firstLine}`));
-  details.append(el("pre", "", args));
-  return details;
+// Build the diff lines for a write tool call: the whole file is added.
+function diffLinesForWrite(args) {
+  const path = typeof args.path === "string" ? args.path : "";
+  const lines = [
+    { kind: "file", text: "--- /dev/null" },
+    { kind: "file", text: `+++ b/${path}` },
+  ];
+  const content = typeof args.content === "string" ? args.content : "";
+  for (const line of content.split("\n")) lines.push({ kind: "add", text: line });
+  return lines;
+}
+
+// Render diff lines into a pre with one colored span per line.
+function diffPre(lines) {
+  const pre = el("pre", "diff");
+  for (const line of lines) pre.append(el("span", `diff-line ${line.kind}`, line.text));
+  return pre;
+}
+
+// Build the always-expanded diff body for a file edit tool call.
+// Returns null when the arguments do not parse to an object.
+function fileEditDiff(name, args) {
+  const parsed = parseArgs(args);
+  if (!parsed) return null;
+  return diffPre(name === "write" ? diffLinesForWrite(parsed) : diffLinesForEdit(parsed));
+}
+
+// Build a short one-line summary of a tool call's arguments.
+function toolSummary(args) {
+  const parsed = parseArgs(args);
+  if (parsed) {
+    for (const key of ["command", "path", "query", "url", "pattern"]) {
+      if (typeof parsed[key] === "string" && parsed[key]) return parsed[key].split("\n")[0];
+    }
+  }
+  const text = args === undefined ? "" : typeof args === "string" ? args : JSON.stringify(args, null, 2);
+  return text.split("\n")[0];
+}
+
+// Build one tool call entry for the tool panel: head, arguments (a diff
+// for file edits, JSON otherwise), and the result when present.
+function toolCallEntry(name, args, result, isError, callId) {
+  const div = el("div", "tool-entry");
+  if (callId) div.dataset.callId = callId;
+  div.append(el("div", "tool-head", `${name} ${toolSummary(args)}`));
+  const diff = kDiffToolNames.has(name) ? fileEditDiff(name, args) : null;
+  if (diff) {
+    div.append(diff);
+  } else {
+    const argText = args === undefined ? "" : typeof args === "string" ? args : JSON.stringify(args, null, 2);
+    div.append(el("pre", "tool-args", argText));
+  }
+  const resultPre = el("pre", "tool-result");
+  if (result) {
+    resultPre.textContent = result;
+    if (isError) resultPre.classList.add("error");
+  } else {
+    resultPre.hidden = true;
+  }
+  div.append(resultPre);
+  return div;
+}
+
+// Build a subtle clickable chip for a tool call in the main chat.
+// Clicking it opens the tool panel and jumps to the matching entry.
+function toolCallChip(name, args, callId) {
+  const chip = el("div", "tool-chip");
+  if (callId) chip.dataset.callId = callId;
+  chip.append(el("span", "chip-name", name), el("span", "chip-arg", toolSummary(args)));
+  chip.onclick = () => openToolPanelFor(chip.dataset.callId);
+  return chip;
+}
+
+// Open the tool panel and scroll to the entry for the given tool call.
+function openToolPanelFor(callId) {
+  setToolPanel(true);
+  const target = elements.toolPanelBody.querySelector(`[data-call-id="${callId}"]`);
+  if (!target) return;
+  target.scrollIntoView({ behavior: "smooth", block: "center" });
+  target.classList.add("flash");
+  setTimeout(() => target.classList.remove("flash"), kFlashMs);
 }
 
 // Start a new assistant bubble for live streaming.
@@ -563,38 +769,42 @@ function resetStreamingState() {
   elements.abortBtn.hidden = true;
 }
 
-// Add a live tool block for a tool_execution_start event.
+// Add a live tool entry to the tool panel and a chip to the chat
+// for a tool_execution_start event.
 function addLiveToolBlock(event) {
-  const details = document.createElement("details");
-  details.className = "tool-call";
-  const args = JSON.stringify(event.args ?? {}, null, 2);
-  const firstLine = args.split("\n")[0].slice(0, 80);
-  details.append(el("summary", "", `${event.toolName} ${firstLine}`));
-  const pre = el("pre", "", "");
-  details.append(pre);
-  if (state.streamBubble) state.streamBubble.append(details);
-  else elements.messages.append(details);
-  state.liveTools.set(event.toolCallId, { summary: details.querySelector("summary"), pre });
-  scrollBottom();
+  const node = toolCallEntry(event.toolName, event.args, null, false, event.toolCallId);
+  elements.toolPanelBody.append(node);
+  state.liveTools.set(event.toolCallId, {
+    head: node.querySelector(".tool-head"),
+    output: node.querySelector(".tool-result"),
+  });
+  if (state.streamBubble) state.streamBubble.append(toolCallChip(event.toolName, event.args, event.toolCallId));
+  scrollPanelBottom();
 }
 
-// Update the live tool block with accumulated output.
+// Update the live tool entry with accumulated output.
 function updateLiveToolBlock(event) {
   const block = state.liveTools.get(event.toolCallId);
   if (!block) return;
   const content = event.partialResult?.content;
   const text = Array.isArray(content) ? extractText(content) : "";
-  if (text) block.pre.textContent = text;
+  if (text) {
+    block.output.textContent = text;
+    block.output.hidden = false;
+  }
 }
 
-// Mark the live tool block as finished.
+// Mark the live tool entry as finished.
 function finalizeLiveToolBlock(event) {
   const block = state.liveTools.get(event.toolCallId);
   if (!block) return;
   const result = event.result?.content;
   const text = Array.isArray(result) ? extractText(result) : "";
-  if (text) block.pre.textContent = text;
-  if (event.isError && block.summary) block.summary.textContent += " (error)";
+  if (text) {
+    block.output.textContent = text;
+    block.output.hidden = false;
+  }
+  if (event.isError && block.head) block.head.textContent += " (error)";
 }
 
 // Open the SSE stream for the active session.
@@ -718,12 +928,17 @@ function init() {
   elements.search.oninput = renderSessionList;
   elements.refreshBtn.onclick = () => loadSessions().catch((err) => console.error(err));
   elements.newSessionBtn.onclick = newSession;
+  elements.emptyNewBtn.onclick = newSession;
   elements.deleteSelectedBtn.onclick = deleteSelected;
   elements.sendBtn.onclick = sendMessage;
   elements.abortBtn.onclick = abortRun;
   elements.stopBtn.onclick = stopProcess;
   elements.modelSelect.addEventListener("focus", loadModels);
   elements.modelSelect.addEventListener("change", changeModel);
+  elements.toolPanelToggle.onclick = toggleToolPanel;
+  elements.toolPanelClose.onclick = toggleToolPanel;
+  state.panelOpen = loadPanelOpen();
+  setToolPanel(state.panelOpen);
   elements.input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -738,16 +953,12 @@ function init() {
   boot();
 }
 
-// Load the session list, then open the newest session by default.
+// Load the session list on startup; the default page shows until a session is opened.
 async function boot() {
   try {
     await loadSessions();
   } catch (err) {
     console.error("failed to load sessions:", err);
-    return;
-  }
-  if (state.sessions.length > 0) {
-    openSession(state.sessions[0].id).catch((err) => console.error("failed to open session:", err));
   }
 }
 

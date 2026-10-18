@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { deleteSessionFile, findSession, listSessions, readSessionMessages } from "./session_store.js";
+import { generateSessionTitle } from "./session_titles.js";
 
 const kLogPrefix = "server";
 const kMaxBodyBytes = 1024 * 1024;
@@ -93,11 +94,11 @@ async function openSseStream(res, sessionId, manager) {
   });
 }
 
-// Create the HTTP server. options: { sessionsDir, manager, publicDir }.
+// Create the HTTP server. options: { sessionsDir, manager, publicDir, titleStore }.
 export function createServer(options) {
-  const { sessionsDir, manager, publicDir } = options;
+  const { sessionsDir, manager, publicDir, titleStore } = options;
 
-  // Stop the session process, forget it, and delete its file.
+  // Stop the session process, forget it, and delete its file and title.
   // Throws when the session is not known and not on disk.
   async function deleteSessionById(id) {
     const session = (await findSession(sessionsDir, id)) ?? manager.getKnownSession(id);
@@ -105,7 +106,24 @@ export function createServer(options) {
     manager.stop(session.id);
     manager.forgetSession(session.id);
     await deleteSessionFile(session.file);
+    await titleStore.delete(session.id);
     return session;
+  }
+
+  // Resolve the title for a session: the stored title, the session's own
+  // name, or a freshly generated title that is stored for next time.
+  async function resolveSessionTitle(session) {
+    const stored = await titleStore.get(session.id);
+    if (stored) return stored;
+    if (session.name) return session.name;
+    const entries = await readSessionMessages(session.file);
+    const title = await generateSessionTitle({
+      piCommand: manager.getPiCommand(),
+      cwd: session.cwd,
+      entries,
+    });
+    if (title) await titleStore.set(session.id, title);
+    return title;
   }
 
   // Handle one API request. parts is the pathname split into segments.
@@ -150,6 +168,8 @@ export function createServer(options) {
       for (const known of manager.getKnownSessions()) {
         if (!sessions.some((s) => s.id === known.id)) sessions.push(known);
       }
+      const titles = await titleStore.all();
+      for (const session of sessions) session.title = titles[session.id] ?? null;
       sessions.sort((a, b) => b.lastActivity.localeCompare(a.lastActivity));
       return sendJson(res, 200, { sessions });
     }
@@ -166,6 +186,10 @@ export function createServer(options) {
     if (action === "messages" && req.method === "GET") {
       const messages = await readSessionMessages(session.file);
       return sendJson(res, 200, { messages });
+    }
+    if (action === "title" && req.method === "GET") {
+      const title = await resolveSessionTitle(session);
+      return sendJson(res, 200, { title });
     }
     if (action === "status" && req.method === "GET") {
       return sendJson(res, 200, await manager.getState(session.id));

@@ -19,30 +19,49 @@
       </footer>
     </aside>
     <main id="main">
-      <div id="empty-state">Select a session from the left.</div>
-      <div id="chat" hidden>
-        <header id="chat-header">
-          <div id="chat-title-row">
-            <span id="chat-name"></span>
-            <span id="chat-cwd"></span>
-            <span id="chat-model"></span>
-          </div>
-          <div id="chat-status-row">
-            <select id="model-select" title="Change model"><option value="">Choose model…</option></select>
-            <span id="status-dot" class="dot"></span>
-            <span id="status-text"></span>
-            <button id="stop-btn" type="button">Stop process</button>
-          </div>
-        </header>
-        <div id="messages"></div>
-        <footer id="input-bar">
-          <textarea id="input" rows="2"
-            placeholder="Send a message to Pi. Enter sends, Shift+Enter adds a newline."></textarea>
-          <div id="input-buttons">
-            <button id="abort-btn" type="button" hidden>Abort</button>
-            <button id="send-btn" type="button">Send</button>
-          </div>
-        </footer>
+      <div id="empty-state">
+        <div class="empty-title">Pi Chat</div>
+        <div id="empty-summary" class="empty-summary"></div>
+        <button id="empty-new-btn" type="button">New session</button>
+        <div class="empty-tips">
+          <div>Enter sends · Shift+Enter adds a newline</div>
+          <div>Ctrl+click multi-select · drag to select many</div>
+          <div>Click a selected session to deselect</div>
+        </div>
+      </div>
+      <div id="chat-row">
+        <div id="chat" hidden>
+          <header id="chat-header">
+            <div id="chat-title-row">
+              <span id="chat-name"></span>
+              <span id="chat-cwd"></span>
+              <span id="chat-model"></span>
+              <button id="tool-panel-toggle" type="button">Hide tools</button>
+            </div>
+            <div id="chat-status-row">
+              <select id="model-select" title="Change model"><option value="">Choose model…</option></select>
+              <span id="status-dot" class="dot"></span>
+              <span id="status-text"></span>
+              <button id="stop-btn" type="button">Stop process</button>
+            </div>
+          </header>
+          <div id="messages"></div>
+          <footer id="input-bar">
+            <textarea id="input" rows="2"
+              placeholder="Send a message to Pi. Enter sends, Shift+Enter adds a newline."></textarea>
+            <div id="input-buttons">
+              <button id="abort-btn" type="button" hidden>Abort</button>
+              <button id="send-btn" type="button">Send</button>
+            </div>
+          </footer>
+        </div>
+        <aside id="tool-panel" hidden>
+          <header id="tool-panel-header">
+            <span id="tool-panel-title">Tool calls</span>
+            <button id="tool-panel-close" type="button" title="Hide tool calls">✕</button>
+          </header>
+          <div id="tool-panel-body"></div>
+        </aside>
       </div>
     </main>
   </div>
