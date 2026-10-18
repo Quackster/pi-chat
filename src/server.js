@@ -113,10 +113,12 @@ export function createServer(options) {
 
   // Resolve the title for a session: the stored title, the session's own
   // name, or a freshly generated title that is stored for next time.
+  // Generation only happens when auto titles are enabled.
   async function resolveSessionTitle(session) {
     const stored = await titleStore.get(session.id);
     if (stored) return stored;
     if (session.name) return session.name;
+    if (!(await config.get("autoTitle"))) return null;
     const entries = await readSessionMessages(session.file);
     const title = await generateSessionTitle({
       piCommand: manager.getPiCommand(),

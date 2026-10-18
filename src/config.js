@@ -1,5 +1,7 @@
 // App configuration, persisted as JSON in the server directory.
 // A missing file or missing keys fall back to defaults.
+// The file is re-read on every access, so edits apply without a
+// restart.
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -16,13 +18,11 @@ export class AppConfig {
   constructor(file) {
     this.file_ = file;
     this.values_ = { ...kDefaults };
-    this.loaded_ = false;
   }
 
-  // Load values from disk once. Missing file or keys keep defaults.
+  // Re-read values from disk. Missing file or keys keep the current
+  // values.
   async load_() {
-    if (this.loaded_) return;
-    this.loaded_ = true;
     try {
       const data = JSON.parse(await readFile(this.file_, "utf8"));
       for (const [key, value] of Object.entries(kDefaults)) {

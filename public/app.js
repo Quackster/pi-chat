@@ -48,7 +48,6 @@ const elements = {
   toolPanelBody: document.getElementById("tool-panel-body"),
   toolPanelToggle: document.getElementById("tool-panel-toggle"),
   toolPanelClose: document.getElementById("tool-panel-close"),
-  autoTitleToggle: document.getElementById("auto-title-toggle"),
 };
 
 // Fetch a JSON API endpoint. Throws with the server error message.
@@ -461,24 +460,8 @@ async function loadConfig() {
   try {
     const data = await api("/api/config");
     state.autoTitle = Boolean(data.autoTitle);
-    elements.autoTitleToggle.checked = state.autoTitle;
   } catch (err) {
     console.error("config load failed:", err);
-  }
-}
-
-// Save the auto title toggle to the server config.
-async function saveAutoTitle() {
-  try {
-    const data = await api("/api/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ autoTitle: elements.autoTitleToggle.checked }),
-    });
-    state.autoTitle = Boolean(data.autoTitle);
-  } catch (err) {
-    console.error("config save failed:", err);
-    elements.autoTitleToggle.checked = state.autoTitle;
   }
 }
 
@@ -966,7 +949,6 @@ function init() {
   elements.modelSelect.addEventListener("change", changeModel);
   elements.toolPanelToggle.onclick = toggleToolPanel;
   elements.toolPanelClose.onclick = toggleToolPanel;
-  elements.autoTitleToggle.onchange = saveAutoTitle;
   state.panelOpen = loadPanelOpen();
   setToolPanel(state.panelOpen);
   elements.input.addEventListener("keydown", (e) => {
