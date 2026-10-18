@@ -55,6 +55,9 @@ The Pi process starts on the first message if it is not already running.
 
 | Route | Method | Meaning |
 |-------|--------|---------|
+| `/api/new-session` | POST | Create a session in a working directory. Body: `{"cwd": "..."}` |
+| `/api/browse` | GET | List subdirectories of a path. Query: `path` (default: the service user's home) |
+| `/api/mkdir` | POST | Create a directory (including missing parents). Body: `{"path": "..."}` |
 | `/api/sessions` | GET | List all sessions, newest first |
 | `/api/sessions/:id/messages` | GET | Active branch of one session |
 | `/api/sessions/:id/status` | GET | Process status for one session |

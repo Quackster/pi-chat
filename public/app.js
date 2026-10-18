@@ -240,7 +240,12 @@ function updateDeleteButton() {
 
 // Delete a session file through the server and refresh the list.
 async function deleteSession(session) {
-  if (!window.confirm(`Delete session "${sessionTitle(session)}"? This removes the session file.`)) return;
+  const ok = await confirmDialog(
+    "Delete session",
+    `Delete session "${sessionTitle(session)}"? This removes the session file.`,
+    "Delete",
+  );
+  if (!ok) return;
   try {
     await api(`/api/sessions/${session.id}`, { method: "DELETE" });
   } catch (err) {
@@ -263,7 +268,12 @@ async function deleteSelected() {
   const shown = names.slice(0, 5).join(", ");
   const extra = names.length > 5 ? `, and ${names.length - 5} more` : "";
   const label = names.length > 0 ? ` (${shown}${extra})` : "";
-  if (!window.confirm(`Delete ${ids.length} sessions${label}? This removes the session files.`)) return;
+  const ok = await confirmDialog(
+    "Delete sessions",
+    `Delete ${ids.length} sessions${label}? This removes the session files.`,
+    "Delete",
+  );
+  if (!ok) return;
   try {
     await api("/api/sessions/bulk-delete", {
       method: "POST",
@@ -360,14 +370,17 @@ function handleKeydown(e) {
       cancelDialog();
       return;
     }
+    if (localDialog) {
+      dismissLocalDialog();
+      return;
+    }
     clearSelection();
   }
 }
 
 // Start a new session in a chosen working directory.
 async function newSession() {
-  const active = state.sessions.find((s) => s.id === state.activeId);
-  const cwd = window.prompt("Working directory for the new session:", active?.cwd ?? "~");
+  const cwd = await directoryDialog();
   if (!cwd) return;
   try {
     const created = await api("/api/new-session", {
@@ -378,7 +391,7 @@ async function newSession() {
     await loadSessions();
     await openSession(created.id);
   } catch (err) {
-    console.error("new session failed:", err);
+    showToast(`New session failed: ${err.message}`, "error");
   }
 }
 
@@ -699,6 +712,7 @@ function handleExtensionUi(event) {
 
 // Open a dialog for an extension UI request. Replaces any open dialog.
 function openDialog(request) {
+  dismissLocalDialog();
   state.pendingDialog = { sessionId: state.activeId, request };
   elements.dialogTitle.textContent = request.title ?? "";
   const body = elements.dialogBody;
@@ -769,6 +783,168 @@ async function respondDialog(payload) {
 // Dismiss the open dialog without answering.
 function cancelDialog() {
   respondDialog({ cancelled: true });
+}
+
+// The open in-page dialog (confirm or prompt). settle resolves the
+// promise; dismissValue is what a dismiss (Escape, backdrop click, or
+// an extension dialog taking over the box) resolves with.
+let localDialog = null;
+
+// Settle the open in-page dialog with a value. A second settle is a no-op.
+function settleLocalDialog(value) {
+  if (!localDialog) return;
+  const settle = localDialog.settle;
+  localDialog = null;
+  elements.dialogBackdrop.hidden = true;
+  settle(value);
+}
+
+// Dismiss the open in-page dialog with its dismiss value.
+function dismissLocalDialog() {
+  if (!localDialog) return;
+  settleLocalDialog(localDialog.dismissValue);
+}
+
+// Show an in-page confirmation in the dialog box. Resolves true only
+// when the user clicks the confirm button. Any dismiss resolves false.
+function confirmDialog(title, message, confirmLabel) {
+  return new Promise((resolve) => {
+    if (state.pendingDialog) cancelDialog();
+    localDialog = { settle: resolve, dismissValue: false };
+    elements.dialogTitle.textContent = title;
+    const body = elements.dialogBody;
+    const actions = elements.dialogActions;
+    body.innerHTML = "";
+    actions.innerHTML = "";
+    if (message) body.append(el("div", "dialog-message", message));
+    const yes = el("button", "", confirmLabel ?? "OK");
+    yes.type = "button";
+    yes.onclick = () => settleLocalDialog(true);
+    const no = el("button", "", "Cancel");
+    no.type = "button";
+    no.onclick = () => settleLocalDialog(false);
+    actions.append(yes, no);
+    elements.dialogBackdrop.hidden = false;
+  });
+}
+
+// Open the new-session directory picker. Lists subdirectories and
+// defaults to the service user's home. Resolves the chosen path, or
+// null when dismissed or cancelled.
+function directoryDialog() {
+  return new Promise((resolve) => {
+    if (state.pendingDialog) cancelDialog();
+    localDialog = { settle: resolve, dismissValue: null };
+    elements.dialogTitle.textContent = "New session";
+    const body = elements.dialogBody;
+    const actions = elements.dialogActions;
+    body.innerHTML = "";
+    actions.innerHTML = "";
+    body.append(el("div", "dialog-message", "Working directory for the new session:"));
+    const field = document.createElement("input");
+    field.className = "dialog-field";
+    field.type = "text";
+    field.placeholder = "path";
+    body.append(field);
+    const toolbar = el("div", "dir-toolbar");
+    body.append(toolbar);
+    const list = el("div", "dir-list");
+    body.append(list);
+    const select = el("button", "", "Select");
+    select.type = "button";
+    select.onclick = () => settleLocalDialog(field.value);
+    const cancel = el("button", "", "Cancel");
+    cancel.type = "button";
+    cancel.onclick = () => settleLocalDialog(null);
+    actions.append(select, cancel);
+    field.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        settleLocalDialog(field.value);
+      }
+    });
+    let browseToken = 0;
+    // Load one directory into the field and the list. A stale
+    // response (superseded by a newer click) is dropped.
+    async function browse(dir) {
+      const token = ++browseToken;
+      try {
+        const data = await api(dir ? `/api/browse?path=${encodeURIComponent(dir)}` : "/api/browse");
+        if (token !== browseToken) return;
+        field.value = data.path;
+        renderToolbar(data.path, data.home);
+        list.innerHTML = "";
+        if (data.path !== "/") {
+          list.append(dirItem("..", data.path.split("/").slice(0, -1).join("/") || "/"));
+        }
+        for (const entry of data.entries) list.append(dirItem(entry.name, entry.path));
+      } catch (err) {
+        if (token === browseToken) showToast(`Browse failed: ${err.message}`, "error");
+      }
+    }
+    const dirItem = (name, target) => {
+      const item = el("button", "dir-item", name);
+      item.type = "button";
+      item.onclick = () => browse(target);
+      return item;
+    };
+    const toolButton = (label, onclick) => {
+      const button = el("button", "dir-tool", label);
+      button.type = "button";
+      button.onclick = onclick;
+      return button;
+    };
+    // Toolbar buttons for the current directory.
+    function renderToolbar(current, home) {
+      toolbar.innerHTML = "";
+      toolbar.append(toolButton("Go", () => browse(field.value)));
+      if (current !== "/") {
+        toolbar.append(toolButton("↑", () => browse(current.split("/").slice(0, -1).join("/") || "/")));
+      }
+      toolbar.append(toolButton("Home", () => browse(home)));
+      toolbar.append(toolButton("New folder", startNewFolder));
+      toolbar.append(toolButton("Refresh", () => browse(field.value)));
+    }
+    // Replace the toolbar with a name input to create a subdirectory.
+    function startNewFolder() {
+      const name = document.createElement("input");
+      name.className = "dialog-field";
+      name.type = "text";
+      name.placeholder = "new folder name";
+      const ok = el("button", "", "OK");
+      ok.type = "button";
+      const back = el("button", "", "Cancel");
+      back.type = "button";
+      back.onclick = () => browse(field.value);
+      ok.onclick = async () => {
+        const folder = name.value.trim();
+        if (!folder) return;
+        const target = field.value === "/" ? `/${folder}` : `${field.value}/${folder}`;
+        try {
+          await api("/api/mkdir", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: target }),
+          });
+          browse(target);
+        } catch (err) {
+          showToast(`New folder failed: ${err.message}`, "error");
+        }
+      };
+      name.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          ok.onclick();
+        }
+      });
+      toolbar.innerHTML = "";
+      toolbar.append(name, ok, back);
+      name.focus();
+    }
+    elements.dialogBackdrop.hidden = false;
+    field.focus();
+    browse(null);
+  });
 }
 
 // Re-render the message history and the tool panel from disk (the source of truth).
@@ -1244,7 +1420,9 @@ function init() {
     }
   });
   elements.dialogBackdrop.addEventListener("click", (e) => {
-    if (e.target === elements.dialogBackdrop) cancelDialog();
+    if (e.target !== elements.dialogBackdrop) return;
+    if (state.pendingDialog) cancelDialog();
+    else dismissLocalDialog();
   });
   elements.sessionList.addEventListener("mousedown", startDrag);
   elements.sessionList.addEventListener("click", swallowDragClick, true);

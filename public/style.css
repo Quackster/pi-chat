@@ -360,6 +360,43 @@ html, body {
 
 textarea.dialog-field { resize: vertical; }
 
+.dir-list {
+  margin-top: 6px;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input);
+}
+
+.dir-toolbar {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.dir-tool {
+  padding: 4px 10px;
+  font-size: 12px;
+}
+
+.dir-toolbar .dialog-field { flex: 1; }
+
+.dir-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 5px 10px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dir-item:hover { background: rgba(77, 163, 255, 0.15); }
+
 #ext-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
 
 /* Tool panel */

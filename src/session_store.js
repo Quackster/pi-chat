@@ -78,16 +78,41 @@ function summarize(file, header, entries) {
 }
 
 // Parse one session file into { summary, entries }.
+// Files that lost their first line (truncated writes) get a
+// synthesized header from the file name and directory name.
 async function parseSessionFile(file) {
   const raw = await readFile(file, "utf8");
   const lines = parseJsonl(raw, path.basename(file));
-  const header = lines.find((entry) => entry.type === "session");
+  let header = lines.find((entry) => entry.type === "session");
   if (!header) {
-    log(`no header in ${file}, skipping`);
-    return null;
+    header = synthesizeHeader(file);
+    if (!header) {
+      log(`no header in ${file}, skipping`);
+      return null;
+    }
+    log(`synthesized header for truncated file ${file}`);
   }
   const entries = lines.filter((entry) => entry.type !== "session");
   return { summary: summarize(file, header, entries), entries };
+}
+
+// Rebuild a minimal header for a file that lost its first line.
+// The id and creation time come from the file name; the cwd comes
+// from the session subdirectory name. Returns null when the file
+// name does not match the <timestamp>_<uuid>.jsonl pattern.
+function synthesizeHeader(file) {
+  const base = path.basename(file, ".jsonl");
+  const underscore = base.lastIndexOf("_");
+  if (underscore <= 0) return null;
+  const timestamp = base.slice(0, underscore);
+  const id = base.slice(underscore + 1);
+  if (!timestamp || !/^[0-9a-f-]+$/i.test(id)) return null;
+  const dir = path.basename(path.dirname(file));
+  const cwd =
+    dir.startsWith("--") && dir.endsWith("--") && dir.length > 4
+      ? dir.slice(1, -1).replace(/-/g, "/")
+      : null;
+  return { id, timestamp, cwd };
 }
 
 // List every session in the session directory, newest activity first.

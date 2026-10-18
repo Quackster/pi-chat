@@ -4,7 +4,8 @@
 
 import http from "node:http";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { deleteSessionFile, findSession, listSessions, readSessionMessages } from "./session_store.js";
 import { generateSessionTitle } from "./session_titles.js";
@@ -185,6 +186,45 @@ export function createServer(options) {
         return sendJson(res, 400, { error: `cwd does not exist: ${body.cwd}` });
       }
       return sendJson(res, 200, await manager.startNewSession(body.cwd));
+    }
+    if (parts[1] === "browse" && req.method === "GET") {
+      const url = new URL(req.url, "http://localhost");
+      const raw = url.searchParams.get("path");
+      const target = raw ? path.resolve(raw) : os.homedir();
+      let info;
+      try {
+        info = await stat(target);
+      } catch {
+        return sendJson(res, 404, { error: `no such directory: ${target}` });
+      }
+      if (!info.isDirectory()) {
+        return sendJson(res, 400, { error: `not a directory: ${target}` });
+      }
+      let dirents;
+      try {
+        dirents = await readdir(target, { withFileTypes: true });
+      } catch (err) {
+        return sendJson(res, 500, { error: `cannot read ${target}: ${err.message}` });
+      }
+      const entries = dirents
+        .filter((d) => d.isDirectory() || d.isSymbolicLink())
+        .filter((d) => !d.name.startsWith("."))
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map((d) => ({ name: d.name, path: target === "/" ? `/${d.name}` : `${target}/${d.name}` }));
+      return sendJson(res, 200, { path: target, home: os.homedir(), entries });
+    }
+    if (parts[1] === "mkdir" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      if (typeof body.path !== "string" || !body.path) {
+        return sendJson(res, 400, { error: "path must be a non-empty string" });
+      }
+      const target = path.resolve(body.path);
+      try {
+        await mkdir(target, { recursive: true });
+      } catch (err) {
+        return sendJson(res, 500, { error: `mkdir failed: ${err.message}` });
+      }
+      return sendJson(res, 200, { ok: true, path: target });
     }
     if (parts[1] !== "sessions") {
       return sendJson(res, 404, { error: `unknown api route: ${req.url}` });
