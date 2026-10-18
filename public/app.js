@@ -6,6 +6,7 @@ const kPanelStorageKey = "pi-chat-tool-panel";
 const kDiffToolNames = new Set(["edit", "write"]);
 const kFlashMs = 1500;
 const kToastMs = 6000;
+const kProcessingPlaceholder = "Processing prompt...";
 
 const state = {
   sessions: [],
@@ -16,6 +17,10 @@ const state = {
   streaming: false,
   streamBubble: null,
   streamTextEl: null,
+  streamThinkingBox: null,
+  streamThinkingEl: null,
+  streamPlaceholderEl: null,
+  streamHasContent: false,
   panelOpen: true,
   autoTitle: true,
   streamingBehavior: "followUp",
@@ -1159,33 +1164,77 @@ function openToolPanelFor(callId) {
   setTimeout(() => target.classList.remove("flash"), kFlashMs);
 }
 
-// Start a new assistant bubble for live streaming.
+// Remove the streaming marker from a bubble and restore its label.
+function settleBubbleVisuals(bubble) {
+  bubble.classList.remove("streaming");
+  const label = bubble.querySelector(".msg-label");
+  if (label) label.textContent = "Pi";
+}
+
+// Start a new assistant bubble for live streaming. A previous bubble,
+// if any, is settled visually and its state is replaced.
 function startStreamBubble() {
-  finishStreamBubble();
+  if (state.streamBubble) settleBubbleVisuals(state.streamBubble);
+  state.streamBubble = null;
+  state.streamTextEl = null;
+  state.streamThinkingBox = null;
+  state.streamThinkingEl = null;
+  state.streamPlaceholderEl = null;
+  state.streamHasContent = false;
   const div = el("div", "msg assistant streaming");
   div.append(el("div", "msg-label", "Pi · streaming"));
+  const thinking = el("div", "thinking");
+  thinking.hidden = true;
+  thinking.append(el("div", "thinking-label", "thinking"));
+  const thinkingPre = el("pre", "", "");
+  thinking.append(thinkingPre);
   const text = el("div", "msg-text", "");
-  div.append(text);
+  text.hidden = true;
+  const placeholder = el("div", "msg-text msg-placeholder", kProcessingPlaceholder);
+  div.append(thinking, text, placeholder);
   elements.messages.append(div);
   state.streamBubble = div;
   state.streamTextEl = text;
+  state.streamThinkingBox = thinking;
+  state.streamThinkingEl = thinkingPre;
+  state.streamPlaceholderEl = placeholder;
   scrollBottom();
+}
+
+// Reuse the placeholder bubble when it has no content yet; otherwise
+// start a fresh bubble for the new assistant message.
+function ensureStreamBubble() {
+  if (state.streamBubble && !state.streamHasContent) return;
+  startStreamBubble();
 }
 
 // Append a text delta to the streaming bubble.
 function appendStreamText(delta) {
   if (!state.streamTextEl) startStreamBubble();
+  state.streamTextEl.hidden = false;
+  markStreamContent();
   state.streamTextEl.textContent += delta;
   scrollBottom();
 }
 
-// Remove the streaming marker when the run settles.
+// Append a thinking delta to the streaming bubble.
+function appendStreamThinking(delta) {
+  if (!state.streamThinkingEl) startStreamBubble();
+  state.streamThinkingBox.hidden = false;
+  markStreamContent();
+  state.streamThinkingEl.textContent += delta;
+  scrollBottom();
+}
+
+// Mark the bubble as having content: hide the processing placeholder.
+function markStreamContent() {
+  if (state.streamPlaceholderEl) state.streamPlaceholderEl.hidden = true;
+  state.streamHasContent = true;
+}
+
+// Remove the streaming marker when the run settles and clear state.
 function finishStreamBubble() {
-  if (state.streamBubble) {
-    state.streamBubble.classList.remove("streaming");
-    const label = state.streamBubble.querySelector(".msg-label");
-    if (label) label.textContent = "Pi";
-  }
+  if (state.streamBubble) settleBubbleVisuals(state.streamBubble);
   resetStreamingState();
 }
 
@@ -1195,6 +1244,10 @@ function resetStreamingState() {
   state.streaming = false;
   state.streamBubble = null;
   state.streamTextEl = null;
+  state.streamThinkingBox = null;
+  state.streamThinkingEl = null;
+  state.streamPlaceholderEl = null;
+  state.streamHasContent = false;
   state.liveTools.clear();
   elements.stopRunBtn.hidden = true;
 }
@@ -1208,7 +1261,10 @@ function addLiveToolBlock(event) {
     head: node.querySelector(".tool-head"),
     output: node.querySelector(".tool-result"),
   });
-  if (state.streamBubble) state.streamBubble.append(toolCallChip(event.toolName, event.args, event.toolCallId));
+  if (state.streamBubble) {
+    state.streamBubble.append(toolCallChip(event.toolName, event.args, event.toolCallId));
+    markStreamContent();
+  }
   scrollPanelBottom();
 }
 
@@ -1266,13 +1322,15 @@ function handleAgentEvent(event) {
     case "agent_start":
       state.streaming = true;
       elements.stopRunBtn.hidden = false;
+      ensureStreamBubble();
       break;
     case "message_start":
-      if (event.message?.role === "assistant") startStreamBubble();
+      if (event.message?.role === "assistant") ensureStreamBubble();
       break;
     case "message_update": {
       const delta = event.assistantMessageEvent;
       if (delta?.type === "text_delta") appendStreamText(delta.delta);
+      else if (delta?.type === "thinking_delta") appendStreamThinking(delta.delta);
       break;
     }
     case "tool_execution_start":

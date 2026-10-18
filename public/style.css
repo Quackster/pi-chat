@@ -592,6 +592,8 @@ textarea.dialog-field { resize: vertical; }
 
 .msg.streaming .msg-text { border-color: var(--accent); }
 
+.msg-text.msg-placeholder { color: var(--text-dim); font-style: italic; }
+
 .meta-line {
   align-self: center;
   color: var(--text-dim);
