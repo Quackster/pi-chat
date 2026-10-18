@@ -4,7 +4,7 @@ Website UI interface to chat with your Pi agents.
 
 ## Screenshot
 
-![pi-chat screenshot](docs/screenshot.png)
+<img width="1848" height="1076" alt="Screenshot_20261018_142219" src="https://github.com/user-attachments/assets/b2d7f9d5-d64b-41f5-bf4c-b6d822c048dd" />
 
 The left pane lists sessions. The center pane shows the message stream.
 Tool calls appear as chips. File edits show as diffs. Thinking stays expanded.
