@@ -12,8 +12,25 @@ const kReadyTimeoutMs = 30000;
 const kStateTimeoutMs = 5000;
 const kStderrTailLength = 2000;
 
+// The thinking levels pi understands, in cycle order.
+export const kThinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
 function log(message) {
   console.log(`${kLogPrefix}: ${message}`);
+}
+
+// Compute the thinking levels a model exposes. Mirrors pi's rules:
+// non-reasoning models expose only "off"; reasoning models expose
+// off/minimal/low/medium/high unless the map marks them null, and
+// xhigh/max only when the map has an entry for them.
+function supportedThinkingLevels(model) {
+  if (!model.reasoning) return ["off"];
+  return kThinkingLevels.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    if (level === "xhigh" || level === "max") return mapped !== undefined;
+    return true;
+  });
 }
 
 // Owns the pi processes for a set of sessions.
@@ -121,6 +138,8 @@ export class SessionProcessManager {
   }
 
   // List the models available to the session, spawning the process if needed.
+  // Each entry carries the reasoning flag and the model's supported
+  // thinking levels so the UI can offer a per-model thinking selector.
   async getAvailableModels(sessionMeta) {
     await this.ensureProcess(sessionMeta);
     const response = await this.sendCommand(sessionMeta.id, { type: "get_available_models" });
@@ -129,6 +148,8 @@ export class SessionProcessManager {
       provider: model.provider,
       modelId: model.id,
       name: model.name ?? model.id,
+      reasoning: model.reasoning === true,
+      thinkingLevels: supportedThinkingLevels(model),
     }));
   }
 
@@ -137,6 +158,15 @@ export class SessionProcessManager {
     await this.ensureProcess(sessionMeta);
     const response = await this.sendCommand(sessionMeta.id, { type: "set_model", provider, modelId });
     if (response.success === false) throw new Error(response.error ?? "failed to set model");
+    return response.data ?? null;
+  }
+
+  // Set the session thinking level, spawning the process if needed.
+  // pi clamps the level to the current model's supported levels.
+  async setThinkingLevel(sessionMeta, level) {
+    await this.ensureProcess(sessionMeta);
+    const response = await this.sendCommand(sessionMeta.id, { type: "set_thinking_level", level });
+    if (response.success === false) throw new Error(response.error ?? "failed to set thinking level");
     return response.data ?? null;
   }
 

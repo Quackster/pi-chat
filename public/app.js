@@ -6,7 +6,9 @@ const kPanelStorageKey = "pi-chat-tool-panel";
 const kDiffToolNames = new Set(["edit", "write"]);
 const kFlashMs = 1500;
 const kToastMs = 6000;
+const kTypeaheadDelayMs = 150;
 const kProcessingPlaceholder = "Processing prompt...";
+const kThinkingPreviewLines = 6;
 
 const state = {
   sessions: [],
@@ -17,13 +19,17 @@ const state = {
   streaming: false,
   streamBubble: null,
   streamTextEl: null,
+  streamTextRaw: "",
+  streamRenderPending: false,
   streamThinkingBox: null,
   streamThinkingEl: null,
+  streamThinkingRaw: "",
   streamPlaceholderEl: null,
   streamHasContent: false,
   panelOpen: true,
   autoTitle: true,
   streamingBehavior: "followUp",
+  models: [], // available models for the active session, with thinkingLevels
   liveTools: new Map(), // toolCallId -> { head, output }
   commands: [], // { name, description, source }
   extStatus: new Map(), // statusKey -> statusText
@@ -49,6 +55,7 @@ const elements = {
   chatCwd: document.getElementById("chat-cwd"),
   chatModel: document.getElementById("chat-model"),
   modelSelect: document.getElementById("model-select"),
+  thinkingLevelSelect: document.getElementById("thinking-level-select"),
   statusDot: document.getElementById("status-dot"),
   statusText: document.getElementById("status-text"),
   stopBtn: document.getElementById("stop-btn"),
@@ -520,6 +527,7 @@ async function loadModels() {
   try {
     const data = await api(`/api/sessions/${requestedId}/models`);
     if (requestedId !== state.activeId) return;
+    state.models = data.models;
     for (const model of data.models) {
       const option = el("option", "", `${model.name} (${model.provider})`);
       option.value = `${model.provider}|${model.modelId}`;
@@ -535,22 +543,78 @@ async function loadModels() {
 
 // Select the dropdown option matching the model the session is currently using.
 // Prefers the live process state; falls back to the session file record.
+// Also fills the thinking level dropdown for that model.
 async function selectCurrentModel(id, models, session) {
   let current = session?.model ?? null;
+  let thinkingLevel = null;
   try {
     const status = await api(`/api/sessions/${id}/status`);
     if (status.model?.provider && status.model?.id) {
       current = `${status.model.provider}/${status.model.id}`;
     }
+    thinkingLevel = status.thinkingLevel ?? null;
   } catch {
     // Process not ready; keep the session file record.
   }
   if (id !== state.activeId) return;
-  if (!current) return;
+  if (!current) {
+    updateThinkingLevels(null, thinkingLevel);
+    return;
+  }
   const match = models.find((m) => `${m.provider}/${m.modelId}` === current);
   if (match) {
     elements.modelSelect.value = `${match.provider}|${match.modelId}`;
     elements.chatModel.textContent = `· ${current}`;
+  }
+  updateThinkingLevels(match ?? null, thinkingLevel);
+}
+
+// Display label for a thinking level. "off" is the non-thinking option.
+function thinkingLevelLabel(level) {
+  return level === "off" ? "off (no thinking)" : level;
+}
+
+// Fill the thinking level dropdown for one model and select the active
+// level when it is listed. With no model, the dropdown stays empty
+// and disabled so a level can only be chosen per model.
+function updateThinkingLevels(model, activeLevel) {
+  const select = elements.thinkingLevelSelect;
+  select.innerHTML = "";
+  if (!model) {
+    select.append(el("option", "", "Choose level…"));
+    select.disabled = true;
+    return;
+  }
+  select.disabled = false;
+  for (const level of model.thinkingLevels) {
+    const option = el("option", "", thinkingLevelLabel(level));
+    option.value = level;
+    select.append(option);
+  }
+  if (activeLevel && model.thinkingLevels.includes(activeLevel)) {
+    select.value = activeLevel;
+  }
+}
+
+// Select the given level in the thinking dropdown when it is listed.
+// Used to follow live state (hello event, status refreshes).
+function syncThinkingLevelSelect(level) {
+  const select = elements.thinkingLevelSelect;
+  for (const option of select.options) {
+    if (option.value === level) {
+      select.value = level;
+      return;
+    }
+  }
+}
+
+// Fetch the session's current thinking level from the live process state.
+async function currentThinkingLevel() {
+  try {
+    const status = await api(`/api/sessions/${state.activeId}/status`);
+    return status.thinkingLevel ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -566,8 +630,27 @@ async function changeModel() {
       body: JSON.stringify({ provider, modelId }),
     });
     elements.chatModel.textContent = `· ${data.model?.name ?? modelId}`;
+    const model = state.models.find((m) => m.provider === provider && m.modelId === modelId) ?? null;
+    // pi clamps the thinking level to the new model's capabilities,
+    // so re-read the level after the switch.
+    updateThinkingLevels(model, await currentThinkingLevel());
   } catch (err) {
     elements.messages.append(el("div", "error-line", `Model change failed: ${err.message}`));
+  }
+}
+
+// Apply the selected thinking level to the active session.
+async function changeThinkingLevel() {
+  const level = elements.thinkingLevelSelect.value;
+  if (!level) return;
+  try {
+    await api(`/api/sessions/${state.activeId}/thinking-level`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ level }),
+    });
+  } catch (err) {
+    elements.messages.append(el("div", "error-line", `Thinking level change failed: ${err.message}`));
   }
 }
 
@@ -796,11 +879,14 @@ function cancelDialog() {
 let localDialog = null;
 
 // Settle the open in-page dialog with a value. A second settle is a no-op.
+// An optional onDismiss hook runs before the settle, for dialog cleanup.
 function settleLocalDialog(value) {
   if (!localDialog) return;
   const settle = localDialog.settle;
+  const onDismiss = localDialog.onDismiss;
   localDialog = null;
   elements.dialogBackdrop.hidden = true;
+  if (onDismiss) onDismiss();
   settle(value);
 }
 
@@ -833,13 +919,19 @@ function confirmDialog(title, message, confirmLabel) {
   });
 }
 
-// Open the new-session directory picker. Lists subdirectories and
-// defaults to the service user's home. Resolves the chosen path, or
-// null when dismissed or cancelled.
+// Open the new-session directory picker. Starts in the active
+// session's working directory, or the service user's home when no
+// session is open. Typing a path live-updates the list with the
+// matching subdirectories. Resolves the chosen path, or null when
+// dismissed or cancelled.
 function directoryDialog() {
   return new Promise((resolve) => {
     if (state.pendingDialog) cancelDialog();
-    localDialog = { settle: resolve, dismissValue: null };
+    localDialog = {
+      settle: resolve,
+      dismissValue: null,
+      onDismiss: () => clearTimeout(typeaheadTimer),
+    };
     elements.dialogTitle.textContent = "New session";
     const body = elements.dialogBody;
     const actions = elements.dialogActions;
@@ -869,24 +961,78 @@ function directoryDialog() {
       }
     });
     let browseToken = 0;
+    let typeaheadTimer = null;
     // Load one directory into the field and the list. A stale
-    // response (superseded by a newer click) is dropped.
+    // response (superseded by a newer click or keystroke) is dropped.
+    // Returns true when the directory loaded.
     async function browse(dir) {
       const token = ++browseToken;
       try {
         const data = await api(dir ? `/api/browse?path=${encodeURIComponent(dir)}` : "/api/browse");
-        if (token !== browseToken) return;
+        if (token !== browseToken) return false;
         field.value = data.path;
         renderToolbar(data.path, data.home);
-        list.innerHTML = "";
-        if (data.path !== "/") {
-          list.append(dirItem("..", data.path.split("/").slice(0, -1).join("/") || "/"));
-        }
-        for (const entry of data.entries) list.append(dirItem(entry.name, entry.path));
+        renderList(data.path, data.entries, "");
+        return true;
       } catch (err) {
         if (token === browseToken) showToast(`Browse failed: ${err.message}`, "error");
+        return false;
       }
     }
+    // Render the directory list: the ".." entry plus the subdirectory
+    // entries, narrowed to names starting with the typed suffix. When
+    // the suffix matches nothing, all entries show.
+    function renderList(dirPath, entries, suffix) {
+      list.innerHTML = "";
+      if (dirPath !== "/") {
+        list.append(dirItem("..", dirPath.split("/").slice(0, -1).join("/") || "/"));
+      }
+      let shown = entries;
+      if (suffix) {
+        const matches = entries.filter((entry) => entry.name.toLowerCase().startsWith(suffix.toLowerCase()));
+        if (matches.length > 0) shown = matches;
+      }
+      for (const entry of shown) list.append(dirItem(entry.name, entry.path));
+    }
+    // The parent of an absolute directory path and its last segment.
+    // Returns null at the root and for relative paths.
+    function popSegment(dir) {
+      if (!dir.startsWith("/")) return null;
+      const parts = dir.split("/").filter(Boolean);
+      if (parts.length === 0) return null;
+      const segment = parts.pop();
+      const parent = parts.length === 0 ? "/" : `/${parts.join("/")}`;
+      return { parent, segment };
+    }
+    // Live update while typing: walk the typed path up to the longest
+    // existing directory and list its subdirectories matching the
+    // remaining typed text. Never overwrites the typed value.
+    async function browseTypeahead() {
+      const token = ++browseToken;
+      const value = field.value.trim();
+      if (!value) return;
+      let dir = value;
+      let suffix = "";
+      let data = null;
+      for (;;) {
+        try {
+          data = await api(`/api/browse?path=${encodeURIComponent(dir)}`);
+          break;
+        } catch {
+          const step = popSegment(dir);
+          if (!step) return;
+          suffix = step.segment + (suffix ? `/${suffix}` : "");
+          dir = step.parent;
+        }
+      }
+      if (token !== browseToken) return;
+      renderToolbar(data.path, data.home);
+      renderList(data.path, data.entries, suffix);
+    }
+    field.addEventListener("input", () => {
+      clearTimeout(typeaheadTimer);
+      typeaheadTimer = setTimeout(browseTypeahead, kTypeaheadDelayMs);
+    });
     const dirItem = (name, target) => {
       const item = el("button", "dir-item", name);
       item.type = "button";
@@ -948,7 +1094,14 @@ function directoryDialog() {
     }
     elements.dialogBackdrop.hidden = false;
     field.focus();
-    browse(null);
+    // Start in the active session's working directory, or in the
+    // service user's home when no session is open or it is gone.
+    const active = state.sessions.find((s) => s.id === state.activeId);
+    const startDir = active ? active.cwd : null;
+    field.value = startDir ?? "";
+    browse(startDir).then((ok) => {
+      if (!ok && startDir) browse(null);
+    });
   });
 }
 
@@ -1028,7 +1181,11 @@ function messageToDom(message) {
     const div = el("div", "msg assistant");
     div.append(el("div", "msg-label", `Pi${message.model ? ` · ${message.model}` : ""}`));
     for (const block of message.content ?? []) {
-      if (block.type === "text") div.append(el("div", "msg-text", block.text));
+      if (block.type === "text") {
+    const text = el("div", "msg-text");
+    text.innerHTML = renderMarkdown(block.text);
+    div.append(text);
+  }
       else if (block.type === "thinking") div.append(thinkingBlock(block.thinking));
       else if (block.type === "toolCall") {
         if (kDiffToolNames.has(block.name)) div.append(toolCallEntry(block.name, block.arguments, null, false, block.id));
@@ -1041,12 +1198,39 @@ function messageToDom(message) {
   return null;
 }
 
-// Thinking block, always expanded.
+// Thinking block, collapsed to the last few lines by default.
+// Click the label to expand or collapse it.
 function thinkingBlock(text) {
-  const div = el("div", "thinking");
-  div.append(el("div", "thinking-label", "thinking"));
-  div.append(el("pre", "", text));
+  const div = el("div", "thinking collapsed");
+  const label = thinkingLabel(false);
+  div.append(label, el("pre", "", thinkingTail(text)));
+  label.addEventListener("click", () => toggleThinking(div, text));
   return div;
+}
+
+// Build the clickable thinking label with its toggle indicator.
+function thinkingLabel(expanded) {
+  const label = el("div", "thinking-label");
+  label.append(el("span", "thinking-toggle", expanded ? "\u25be" : "\u25b8"), el("span", "", "thinking"));
+  return label;
+}
+
+// Last kThinkingPreviewLines lines of the text, prefixed with an
+// ellipsis when the text was truncated.
+function thinkingTail(text) {
+  const lines = text.split("\n");
+  if (lines.length <= kThinkingPreviewLines) return text;
+  return "\u2026\n" + lines.slice(-kThinkingPreviewLines).join("\n");
+}
+
+// Toggle a thinking block between collapsed (last few lines) and
+// expanded (full text).
+function toggleThinking(div, fullText) {
+  const pre = div.querySelector("pre");
+  const collapsed = div.classList.toggle("collapsed");
+  pre.textContent = collapsed ? thinkingTail(fullText) : fullText;
+  const indicator = div.querySelector(".thinking-toggle");
+  if (indicator) indicator.textContent = collapsed ? "\u25b8" : "\u25be";
 }
 
 // Parse tool arguments into an object, or null when they do not parse.
@@ -1177,8 +1361,11 @@ function startStreamBubble() {
   if (state.streamBubble) settleBubbleVisuals(state.streamBubble);
   state.streamBubble = null;
   state.streamTextEl = null;
+  state.streamTextRaw = "";
+  state.streamRenderPending = false;
   state.streamThinkingBox = null;
   state.streamThinkingEl = null;
+  state.streamThinkingRaw = "";
   state.streamPlaceholderEl = null;
   state.streamHasContent = false;
   const div = el("div", "msg assistant streaming");
@@ -1208,21 +1395,40 @@ function ensureStreamBubble() {
   startStreamBubble();
 }
 
-// Append a text delta to the streaming bubble.
+// Append a text delta to the streaming bubble. The accumulated text
+// is re-rendered as markdown, at most once per animation frame.
+// Thinking deltas stay plain text.
 function appendStreamText(delta) {
   if (!state.streamTextEl) startStreamBubble();
   state.streamTextEl.hidden = false;
   markStreamContent();
-  state.streamTextEl.textContent += delta;
-  scrollBottom();
+  state.streamTextRaw += delta;
+  scheduleStreamTextRender();
 }
 
-// Append a thinking delta to the streaming bubble.
+// Re-render the streamed text as markdown and keep the pane at the
+// bottom. At most one render per animation frame.
+function scheduleStreamTextRender() {
+  if (state.streamRenderPending) return;
+  state.streamRenderPending = true;
+  requestAnimationFrame(() => {
+    state.streamRenderPending = false;
+    if (!state.streamTextEl) return;
+    state.streamTextEl.innerHTML = renderMarkdown(state.streamTextRaw);
+    scrollBottom();
+  });
+}
+
+// Append a thinking delta to the streaming bubble. The full text is
+// kept in state; the visible pane shows the last few lines unless the
+// user expanded the block.
 function appendStreamThinking(delta) {
   if (!state.streamThinkingEl) startStreamBubble();
   state.streamThinkingBox.hidden = false;
   markStreamContent();
-  state.streamThinkingEl.textContent += delta;
+  state.streamThinkingRaw += delta;
+  const expanded = !state.streamThinkingBox.classList.contains("collapsed");
+  state.streamThinkingEl.textContent = expanded ? state.streamThinkingRaw : thinkingTail(state.streamThinkingRaw);
   scrollBottom();
 }
 
@@ -1244,8 +1450,11 @@ function resetStreamingState() {
   state.streaming = false;
   state.streamBubble = null;
   state.streamTextEl = null;
+  state.streamTextRaw = "";
+  state.streamRenderPending = false;
   state.streamThinkingBox = null;
   state.streamThinkingEl = null;
+  state.streamThinkingRaw = "";
   state.streamPlaceholderEl = null;
   state.streamHasContent = false;
   state.liveTools.clear();
@@ -1358,7 +1567,8 @@ function handleAgentEvent(event) {
   }
 }
 
-// Update the process status dot and label.
+// Update the process status dot and label, and follow the live
+// thinking level when the status carries one.
 function updateStatus(status) {
   elements.statusDot.className = `dot${status.running ? " on" : ""}`;
   if (status.running && status.isStreaming) {
@@ -1368,6 +1578,7 @@ function updateStatus(status) {
   } else {
     elements.statusText.textContent = "Pi process stopped. It starts on the next message.";
   }
+  if (status.thinkingLevel !== undefined) syncThinkingLevelSelect(status.thinkingLevel);
 }
 
 // Send the current input as a message or a slash command.
@@ -1441,6 +1652,7 @@ function init() {
   elements.stopBtn.onclick = stopProcess;
   elements.modelSelect.addEventListener("focus", loadModels);
   elements.modelSelect.addEventListener("change", changeModel);
+  elements.thinkingLevelSelect.addEventListener("change", changeThinkingLevel);
   elements.toolPanelToggle.onclick = toggleToolPanel;
   elements.toolPanelClose.onclick = toggleToolPanel;
   state.panelOpen = loadPanelOpen();

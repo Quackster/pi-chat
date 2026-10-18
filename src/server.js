@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { deleteSessionFile, findSession, listSessions, readSessionMessages } from "./session_store.js";
 import { generateSessionTitle } from "./session_titles.js";
+import { kThinkingLevels } from "./rpc_manager.js";
 
 const kLogPrefix = "server";
 const kMaxBodyBytes = 1024 * 1024;
@@ -325,6 +326,14 @@ export function createServer(options) {
       }
       const model = await manager.setModel(session, body.provider, body.modelId);
       return sendJson(res, 200, { ok: true, model });
+    }
+    if (action === "thinking-level" && req.method === "POST") {
+      const body = await readJsonBody(req);
+      if (!kThinkingLevels.includes(body.level)) {
+        return sendJson(res, 400, { error: `level must be one of: ${kThinkingLevels.join(", ")}` });
+      }
+      const response = await manager.setThinkingLevel(session, body.level);
+      return sendJson(res, 200, { ok: true, response });
     }
     if (action === "events" && req.method === "GET") {
       return await openSseStream(res, session.id, manager);
