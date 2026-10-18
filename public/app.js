@@ -18,6 +18,7 @@ const state = {
   streamTextEl: null,
   panelOpen: true,
   autoTitle: true,
+  streamingBehavior: "followUp",
   liveTools: new Map(), // toolCallId -> { head, output }
   commands: [], // { name, description, source }
   extStatus: new Map(), // statusKey -> statusText
@@ -49,7 +50,7 @@ const elements = {
   messages: document.getElementById("messages"),
   input: document.getElementById("input"),
   sendBtn: document.getElementById("send-btn"),
-  abortBtn: document.getElementById("abort-btn"),
+  stopRunBtn: document.getElementById("stop-run-btn"),
   toolPanel: document.getElementById("tool-panel"),
   toolPanelBody: document.getElementById("tool-panel-body"),
   toolPanelToggle: document.getElementById("tool-panel-toggle"),
@@ -483,6 +484,7 @@ async function loadConfig() {
   try {
     const data = await api("/api/config");
     state.autoTitle = Boolean(data.autoTitle);
+    state.streamingBehavior = data.streamingBehavior === "steer" ? "steer" : "followUp";
   } catch (err) {
     console.error("config load failed:", err);
   }
@@ -1018,7 +1020,7 @@ function resetStreamingState() {
   state.streamBubble = null;
   state.streamTextEl = null;
   state.liveTools.clear();
-  elements.abortBtn.hidden = true;
+  elements.stopRunBtn.hidden = true;
 }
 
 // Add a live tool entry to the tool panel and a chip to the chat
@@ -1068,7 +1070,7 @@ function openEventStream(id) {
     updateStatus(status);
     if (status.isStreaming) {
       state.streaming = true;
-      elements.abortBtn.hidden = false;
+      elements.stopRunBtn.hidden = false;
       startStreamBubble();
     }
   });
@@ -1087,7 +1089,7 @@ function handleAgentEvent(event) {
   switch (event.type) {
     case "agent_start":
       state.streaming = true;
-      elements.abortBtn.hidden = false;
+      elements.stopRunBtn.hidden = false;
       break;
     case "message_start":
       if (event.message?.role === "assistant") startStreamBubble();
@@ -1108,7 +1110,7 @@ function handleAgentEvent(event) {
       break;
     case "agent_settled":
       state.streaming = false;
-      elements.abortBtn.hidden = true;
+      elements.stopRunBtn.hidden = true;
       finishStreamBubble();
       refreshMessages();
       if (state.autoTitle) loadTitle(state.activeId);
@@ -1135,28 +1137,23 @@ function updateStatus(status) {
 }
 
 // Send the current input as a message or a slash command.
-// Slash commands are allowed while streaming: extension commands run
-// immediately in pi, other commands are queued as follow-ups.
+// streamingBehavior is always sent: pi ignores it when idle and
+// requires it when streaming. Extension commands execute immediately
+// in pi and ignore it.
 async function sendMessage() {
   const text = elements.input.value.trim();
   if (!text) return;
   const isCommand = text.startsWith("/");
-  if (state.streaming && !isCommand) return;
   elements.input.value = "";
   hideCommandMenu();
   const bubble = el("div", "msg user");
   bubble.append(el("div", "msg-label", "You"), el("div", "msg-body", text));
   elements.messages.append(bubble);
   scrollBottom();
-  const body = { message: text };
-  if (state.streaming) {
-    const first = text.slice(1).split(/\s+/)[0];
-    const knownExtension = state.commands.some((c) => c.source === "extension" && c.name === first);
-    if (!knownExtension) body.streamingBehavior = "followUp";
-  }
+  const body = { message: text, streamingBehavior: state.streamingBehavior };
   if (!isCommand) {
     state.streaming = true;
-    elements.abortBtn.hidden = false;
+    elements.stopRunBtn.hidden = false;
   }
   try {
     await api(`/api/sessions/${state.activeId}/prompt`, {
@@ -1167,19 +1164,19 @@ async function sendMessage() {
   } catch (err) {
     if (!isCommand) {
       state.streaming = false;
-      elements.abortBtn.hidden = true;
+      elements.stopRunBtn.hidden = true;
     }
     elements.messages.append(el("div", "error-line", `Send failed: ${err.message}`));
     scrollBottom();
   }
 }
 
-// Abort the in-flight agent run.
+// Interrupt the in-flight agent run. The pi process stays alive.
 async function abortRun() {
   try {
     await api(`/api/sessions/${state.activeId}/abort`, { method: "POST" });
   } catch (err) {
-    elements.messages.append(el("div", "error-line", `Abort failed: ${err.message}`));
+    elements.messages.append(el("div", "error-line", `Stop failed: ${err.message}`));
   }
 }
 
@@ -1206,7 +1203,7 @@ function init() {
   elements.emptyNewBtn.onclick = newSession;
   elements.deleteSelectedBtn.onclick = deleteSelected;
   elements.sendBtn.onclick = sendMessage;
-  elements.abortBtn.onclick = abortRun;
+  elements.stopRunBtn.onclick = abortRun;
   elements.stopBtn.onclick = stopProcess;
   elements.modelSelect.addEventListener("focus", loadModels);
   elements.modelSelect.addEventListener("change", changeModel);

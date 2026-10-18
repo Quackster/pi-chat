@@ -7,7 +7,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 const kLogPrefix = "config";
-const kDefaults = { autoTitle: true };
+const kDefaults = { autoTitle: true, streamingBehavior: "followUp" };
 
 function log(message) {
   console.log(`${kLogPrefix}: ${message}`);

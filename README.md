@@ -18,6 +18,7 @@ The right pane is the tool call panel. It shows each command and its result.
 - Streams agent events to the browser over Server-Sent Events.
 - Renders extension UI events (status, widgets, notifications, dialogs) generically. Any Pi extension can show state in the UI. The goal extension shows its live goal status this way.
 - The chat input accepts slash commands. A menu lists the available commands. Commands can be sent while the agent is streaming.
+- While the agent is working, the input stays active. New messages are queued with the configured streaming behavior: steer the current run, or queue them as follow-ups. A Stop button under Send interrupts the current run. The Stop process button in the header kills the pi process.
 - The session file on disk is the source of truth for history.
 
 ## Usage
@@ -40,6 +41,15 @@ The Pi process starts on the first message if it is not already running.
 | `PICHAT_PORT` | `8090` | Port to listen on |
 | `PICHAT_HOST` | `127.0.0.1` | Interface to bind |
 | `PI_SESSIONS_DIR` | `~/.pi/agent/sessions` | Session storage directory |
+
+## Configuration
+
+`config.json` in the server directory. Missing keys fall back to defaults.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `autoTitle` | `true` | Generate a title for new sessions |
+| `streamingBehavior` | `followUp` | How to deliver a message while the agent is working: `steer` queues it into the current run, `followUp` queues it until the agent finishes |
 
 ## API
 

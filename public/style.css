@@ -613,5 +613,5 @@ button {
 button:hover { border-color: var(--accent); }
 
 #send-btn { background: rgba(77, 163, 255, 0.2); }
-#abort-btn { color: var(--error); }
+#stop-run-btn { color: var(--error); }
 #delete-selected-btn { color: var(--error); }

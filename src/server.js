@@ -165,6 +165,12 @@ export function createServer(options) {
       if (req.method === "POST") {
         const body = await readJsonBody(req);
         if (body.autoTitle !== undefined) await config.set("autoTitle", body.autoTitle);
+        if (body.streamingBehavior !== undefined) {
+          if (body.streamingBehavior !== "steer" && body.streamingBehavior !== "followUp") {
+            return sendJson(res, 400, { error: "streamingBehavior must be 'steer' or 'followUp'" });
+          }
+          await config.set("streamingBehavior", body.streamingBehavior);
+        }
         return sendJson(res, 200, await config.all());
       }
       return sendJson(res, 405, { error: "use GET or POST" });
